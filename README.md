@@ -69,31 +69,35 @@ git clone https://github.com/<your-username>/achilles-shield.git
 cd achilles-shield
 ```
 ### 2. Server Setup
+```bash
 cd server
 python -m venv venv
 venv\Scripts\activate    # On Windows
 pip install -r requirements.txt
 set API_KEY=supersecret
 python server.py
+```
 
 - **Server will run at** http://127.0.0.1:5000
 
 ### 3. Agent Setup
-cd agent
-python -m venv venv
-venv\Scripts\activate    # On Windows
-pip install -r requirements.txt
-set SERVER_URL=http://127.0.0.1:5000/ingest
-set API_KEY=supersecret
-set HOST_ID=my-test-machine
-python agent.py
+```bash
+- cd agent
+- python -m venv venv
+- venv\Scripts\activate    # On Windows
+- pip install -r requirements.txt
+- set SERVER_URL=http://127.0.0.1:5000/ingest
+- set API_KEY=supersecret
+- set HOST_ID=my-test-machine
+- python agent.py
+```
 
 ### 🤝 Contributing
 
-Future contributions are welcome!
-New data collection modules
-AI models for detection
-Dashboard improvements
+- Future contributions are welcome!
+- New data collection modules
+- AI models for detection
+- Dashboard improvements
 
 ### 📜 License
 
