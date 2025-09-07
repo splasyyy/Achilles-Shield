@@ -5,6 +5,8 @@ It provides **server/agent-based monitoring, anomaly detection, and future AI-dr
 
 ---
 
+![Alt text](static/photo.png)
+
 ## 🚀 Current Features (Implemented ✅)
 
 ### 🔹 Core MVP
@@ -56,8 +58,7 @@ It provides **server/agent-based monitoring, anomaly detection, and future AI-dr
 - **Flask** (server + dashboard)  
 - **SQLite** (lightweight database)  
 - **psutil** (agent telemetry)  
-- **Requests** (agent-server communication)  
-- **Bootstrap + Charts.js** (dashboard visualization)  
+- **Requests** (agent-server communication)    
 
 ---
 
