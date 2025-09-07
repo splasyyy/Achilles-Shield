@@ -5,7 +5,7 @@ It provides **server/agent-based monitoring, anomaly detection, and future AI-dr
 
 ---
 
-![Alt text](server/static/photo.png)
+![Alt text](server/static/logo.png)
 
 ## 🚀 Current Features (Implemented ✅)
 
