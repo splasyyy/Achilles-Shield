@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+ENV/
+env/
+.venv/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Databases (SQLite etc.)
+data.db
+*.sqlite3
+*.db
+
+# Secrets
+.env
+
+# PyInstaller
+*.spec
+
+# Coverage
+.coverage
+htmlcov/
+.tox/
+
+# JetBrains IDEs
+.idea/
+*.iml
