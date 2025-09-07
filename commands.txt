@@ -1,0 +1,38 @@
+cd achilles-shield-mvp\server
+
+:: Create a virtual environment
+python -m venv venv
+
+:: Activate it (different for cmd vs PowerShell)
+venv\Scripts\activate
+
+:: Install dependencies
+pip install -r requirements.txt
+
+:: Set your API_KEY (temporary, only lasts for this terminal session)
+set API_KEY=supersecret
+
+:: Run the server
+python server.py
+
+
+
+
+cd achilles-shield-mvp\agent
+
+:: Create a virtual environment
+python -m venv venv
+
+:: Activate it
+venv\Scripts\activate
+
+:: Install dependencies
+pip install -r requirements.txt
+
+:: Set environment variables (for cmd.exe)
+set SERVER_URL=http://127.0.0.1:5000/ingest
+set API_KEY=supersecret
+set HOST_ID=my-test-machine
+
+:: Run the agent
+python agent.py

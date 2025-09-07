@@ -1,0 +1,292 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Achilles Shield - MVP</title>
+    <meta http-equiv="refresh" content="3">
+    <style>
+      body {
+        font-family: 'Segoe UI', Arial, sans-serif;
+        margin: 24px;
+        background: #18191b;
+        color: #e7e7ea;
+      }
+      h1 {
+        color: #f5c242;
+        letter-spacing: 1px;
+        font-weight: 700;
+        text-shadow: 0 2px 8px #000a;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        background: #232325;
+        box-shadow: 0 2px 24px #0008;
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      th, td {
+        border: 1px solid #232323;
+        padding: 10px 16px;
+        text-align: left;
+      }
+      th {
+        background: #232325;
+        color: #f5c242;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        border-bottom: 2px solid #353535;
+        text-shadow: 0 1px 4px #0006;
+      }
+      tr.offline {
+        background: #2a1a1a !important;
+      }
+      tr {
+        transition: background 0.2s;
+      }
+      tr:hover {
+        background: #23232a;
+      }
+      .badge {
+        display: inline-block;
+        padding: 2px 12px;
+        border-radius: 12px;
+        font-size: 0.97em;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        margin-right: 2px;
+        box-shadow: 0 1px 4px #0002;
+      }
+      .badge.cpu {
+        background: #23232a;
+        color: #ffb347;
+        border: 1px solid #ffb34744;
+      }
+      .badge.ram {
+        background: #23232a;
+        color: #40e0d0;
+        border: 1px solid #40e0d044;
+      }
+      .badge.disk {
+        background: #23232a;
+        color: #f5c242;
+        border: 1px solid #f5c24244;
+      }
+      .badge.online {
+        background: #1e2a22;
+        color: #40e0d0;
+        border: 1px solid #40e0d044;
+      }
+      .badge.offline {
+        background: #3a1e1e;
+        color: #ff7c7c;
+        border: 1px solid #ff7c7c22;
+      }
+      .remove-btn {
+        background: #23232a;
+        color: #ff7c7c;
+        border: none;
+        border-radius: 50%;
+        width: 28px;
+        height: 28px;
+        font-size: 1.1em;
+        cursor: pointer;
+        transition: background 0.2s, color 0.2s;
+        vertical-align: middle;
+        box-shadow: 0 1px 4px #0002;
+      }
+      .remove-btn:hover {
+        background: #ff7c7c;
+        color: #fff;
+      }
+      .details-link {
+        color: #40e0d0;
+        text-decoration: none;
+        font-weight: 600;
+        transition: color 0.2s;
+      }
+      .details-link:hover {
+        color: #f5c242;
+        text-decoration: underline;
+      }
+      ul {
+        margin: 0;
+        padding-left: 18px;
+        font-size: 0.95em;
+      }
+      .metrics {
+        font-size: 0.97em;
+      }
+      #alertBtn { outline: none; }
+      #alertDropdown {
+        font-size: 0.98em;
+        background: #232325 !important;
+        color: #f5c242 !important;
+        border: 1px solid #353535;
+      }
+      .alert-badge {
+        position: absolute;
+        top: -4px;
+        right: -8px;
+        background: #f5c242;
+        color: #232325;
+        border-radius: 50%;
+        font-size: 0.7em;
+        padding: 1px 5px;
+        min-width: 16px;
+        text-align: center;
+        line-height: 1.2;
+        font-weight: 700;
+        box-shadow: 0 1px 3px #0002;
+        border: 1px solid #fff2;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        top: 65%; /* was 50% */
+        left: 50%;
+        width: 60vw;
+        height: 60vw;
+        max-width: 900px;
+        max-height: 900px;
+        transform: translate(-50%, -50%);
+        background: url("{{ url_for('static', filename='logo.png') }}") no-repeat center center;
+        background-size: contain;
+        opacity: 0.07;
+        z-index: 0;
+        pointer-events: none;
+        filter: grayscale(1) blur(0.5px);
+      }
+    </style>
+  </head>
+  <body>
+    <h1 style="display:flex; align-items:center; gap:18px;">
+      Achilles Shield (MVP)
+      <span style="position:relative;">
+        <button id="alertBtn" style="background:none; border:none; cursor:pointer; position:relative; margin-left:8px;">
+          <span style="font-size:1.2em;">🔔</span>
+          {% if alerts|length > 0 %}
+            <span class="alert-badge">{{ alerts|length }}</span>
+          {% endif %}
+        </button>
+        <div id="alertDropdown" style="display:none; position:absolute; right:0; background:#fff; min-width:260px; box-shadow:0 2px 8px #0002; border-radius:8px; z-index:10;">
+          <ul style="list-style:none; margin:0; padding:10px 0; max-height:300px; overflow-y:auto;">
+            {% if alerts|length == 0 %}
+              <li style="padding:8px 18px; color:#888;">No alerts</li>
+            {% else %}
+              {% for alert in alerts %}
+                <li style="padding:8px 18px; border-bottom:1px solid #eee; color:#b71c1c;">{{ alert }}</li>
+              {% endfor %}
+            {% endif %}
+          </ul>
+        </div>
+      </span>
+    </h1>
+    <p>Connected hosts (last telemetry)</p>
+    <table>
+      <tr>
+        <th>Host</th>
+        <th>Last Seen</th>
+        <th>OS</th>
+        <th>CPU</th>
+        <th>RAM</th>
+        <th>Disk</th>
+        <th>Processes</th>
+        <th>Ports</th>
+        <th>Connections</th>
+        <th>Strange IPs</th>
+        <th>Status</th>
+        <th>Actions</th>
+      </tr>
+      {% for h in hosts %}
+      {% set cpu = h.data.get('cpu', 0) %}
+      {% set ram = h.data.get('ram', {}).get('percent', 0) %}
+      {% set disk = h.data.get('disk', {}).get('percent', 0) %}
+      {% set offline = (now - h.ts > 10) %}
+      <tr class="{% if offline %}offline{% endif %}">
+        <td class="metrics">
+          <a href="/agent/{{ h.host_id }}" class="details-link">{{ h.host_id }}</a>
+        </td>
+        <td class="metrics">{{ h.ts | float | round(1) }}</td>
+        <td class="metrics">{{ h.data.get('os', '') }}</td>
+        <td>
+          {% if cpu > 90 %}
+            <span class="badge cpu">{{ cpu }}%</span>
+          {% else %}
+            <span class="badge">{{ cpu }}%</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if ram > 80 %}
+            <span class="badge ram">{{ ram }}%</span>
+          {% else %}
+            <span class="badge">{{ ram }}%</span>
+          {% endif %}
+        </td>
+        <td>
+          <span class="badge disk">{{ disk }}%</span>
+        </td>
+        <td>
+          <ul>
+          {% for p in h.data.get('processes', [])[:3] %}
+            <li>{{ p['name'] }} <small>(pid {{ p['pid'] }})</small></li>
+          {% endfor %}
+          {% if h.data.get('processes', [])|length > 3 %}
+            <li>...and {{ h.data.get('processes', [])|length - 3 }} more</li>
+          {% endif %}
+          </ul>
+        </td>
+        <td>
+          <span class="metrics">{{ h.data.get('open_ports', [])[:5]|join(', ') }}</span>
+          {% if h.data.get('open_ports', [])|length > 5 %}
+            <small>+{{ h.data.get('open_ports', [])|length - 5 }} more</small>
+          {% endif %}
+        </td>
+        <td>
+          <ul>
+          {% for c in h.data.get('active_conns', [])[:2] %}
+            <li>{{ c['laddr'] }} → {{ c['raddr'] }}</li>
+          {% endfor %}
+          {% if h.data.get('active_conns', [])|length > 2 %}
+            <li>...and {{ h.data.get('active_conns', [])|length - 2 }} more</li>
+          {% endif %}
+          </ul>
+        </td>
+        <td>
+          <ul>
+          {% for ip in h.data.get('strange_ips', [])[:2] %}
+            <li>{{ ip }}</li>
+          {% endfor %}
+          {% if h.data.get('strange_ips', [])|length > 2 %}
+            <li>...and {{ h.data.get('strange_ips', [])|length - 2 }} more</li>
+          {% endif %}
+          </ul>
+        </td>
+        <td>
+          {% if offline %}
+            <span class="badge offline">Offline</span>
+          {% else %}
+            <span class="badge online">Online</span>
+          {% endif %}
+        </td>
+        <td>
+          <form method="POST" action="/remove/{{ h.host_id }}" style="display:inline;">
+            <button type="submit" class="remove-btn" title="Remove agent" onclick="return confirm('Remove this agent?');">
+              ✖
+            </button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <script>
+      const btn = document.getElementById('alertBtn');
+      const dd = document.getElementById('alertDropdown');
+      btn.onclick = () => { dd.style.display = dd.style.display === 'block' ? 'none' : 'block'; };
+      document.addEventListener('click', function(e) {
+        if (!btn.contains(e.target)) dd.style.display = 'none';
+      });
+    </script>
+  </body>
+</html>

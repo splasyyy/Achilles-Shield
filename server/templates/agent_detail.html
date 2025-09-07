@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Agent {{ host_id }} Details</title>
+  <meta http-equiv="refresh" content="3">
+  <style>
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      margin: 24px;
+      background: #18191b;
+      color: #e7e7ea;
+    }
+    h1 {
+      color: #f5c242;
+      letter-spacing: 1px;
+      font-weight: 700;
+      text-shadow: 0 2px 8px #000a;
+    }
+    .back-link {
+      color: #40e0d0;
+      text-decoration: none;
+      margin-bottom: 16px;
+      display: inline-block;
+      font-weight: 600;
+      font-size: 1.1em;
+      transition: color 0.2s;
+    }
+    .back-link:hover {
+      color: #f5c242;
+      text-decoration: underline;
+    }
+    .section {
+      background: #232325;
+      padding: 18px;
+      margin-bottom: 18px;
+      border-radius: 14px;
+      box-shadow: 0 2px 16px #0004;
+    }
+    .metric-label {
+      font-weight: 600;
+      color: #f5c242;
+      margin-right: 6px;
+    }
+    ul {
+      max-height: 320px;
+      overflow-y: auto;
+      background: #18191b;
+      padding: 12px;
+      border-radius: 8px;
+      margin: 0;
+      font-size: 1em;
+      border: 1px solid #232323;
+    }
+    h2 {
+      color: #40e0d0;
+      font-size: 1.2em;
+      margin-top: 0;
+      margin-bottom: 10px;
+      font-weight: 700;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 12px;
+      border-radius: 12px;
+      font-size: 0.97em;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      margin-right: 2px;
+      box-shadow: 0 1px 4px #0002;
+    }
+    .badge.cpu {
+      background: #23232a;
+      color: #ffb347;
+      border: 1px solid #ffb34744;
+    }
+    .badge.ram {
+      background: #23232a;
+      color: #40e0d0;
+      border: 1px solid #40e0d044;
+    }
+    .badge.disk {
+      background: #23232a;
+      color: #f5c242;
+      border: 1px solid #f5c24244;
+    }
+  </style>
+</head>
+<body>
+  <a href="/" class="back-link">&larr; Back to Dashboard</a>
+  <h1>Agent: {{ host_id }}</h1>
+  <div class="section">
+    <div><span class="metric-label">Last Seen:</span> {{ ts|float|round(1) }}</div>
+    <div><span class="metric-label">OS:</span> {{ data.get('os', '') }}</div>
+    <div><span class="metric-label">Hostname:</span> {{ data.get('hostname', '') }}</div>
+    <div>
+      <span class="metric-label">CPU:</span>
+      <span class="badge cpu">{{ data.get('cpu', '') }}%</span>
+      <span class="metric-label">RAM:</span>
+      <span class="badge ram">{{ data.get('ram', {}).get('percent', '') }}%</span>
+      <span class="metric-label">Disk:</span>
+      <span class="badge disk">{{ data.get('disk', {}).get('percent', '') }}%</span>
+    </div>
+    <div><span class="metric-label">Open Ports:</span> {{ data.get('open_ports', [])|join(', ') }}</div>
+    <div><span class="metric-label">Strange IPs:</span> {{ data.get('strange_ips', [])|join(', ') }}</div>
+  </div>
+  <div class="section">
+    <h2>Processes ({{ data.get('processes', [])|length }})</h2>
+    <ul id="process-list" style="max-height:400px;overflow-y:auto;">
+      {% for p in data.get('processes', []) %}
+        <li>{{ p['name'] }} (pid {{ p['pid'] }}) - {{ p['user'] }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  <div class="section">
+    <h2>Active Connections ({{ data.get('active_conns', [])|length }})</h2>
+    <ul>
+      {% for c in data.get('active_conns', []) %}
+        <li>{{ c['laddr'] }} → {{ c['raddr'] }} (pid {{ c['pid'] }})</li>
+      {% endfor %}
+    </ul>
+  </div>
+  <script>
+  // Save scroll position before refresh
+  window.addEventListener('beforeunload', function() {
+    var pl = document.getElementById('process-list');
+    if (pl) localStorage.setItem('processScroll', pl.scrollTop);
+  });
+  // Restore scroll position after refresh
+  window.addEventListener('DOMContentLoaded', function() {
+    var pl = document.getElementById('process-list');
+    if (pl) {
+      var scroll = localStorage.getItem('processScroll');
+      if (scroll) pl.scrollTop = scroll;
+    }
+  });
+  </script>
+</body>
+</html>
