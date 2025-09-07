@@ -66,7 +66,7 @@ It provides **server/agent-based monitoring, anomaly detection, and future AI-dr
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/<your-username>/achilles-shield.git
+git clone https://github.com/splasyyy/Achilles-shield.git
 cd achilles-shield
 ```
 ### 2. Server Setup
