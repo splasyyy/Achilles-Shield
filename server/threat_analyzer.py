@@ -490,7 +490,61 @@ class AutonomousResponseEngine:
             self.compromise_tracker.log_compromise(
                 host_id, threat_type, confidence, analysis.get('root_cause', '')
             )
-        
+
+            # Try to enrich/block IPs using threat intelligence if configured
+            try:
+                try:
+                    from . import threat_intel, notifications, incidents
+                except Exception:
+                    import threat_intel, notifications, incidents
+
+                if decision['action'] == 'block_ip' and decision.get('targets'):
+                    enriched = []
+                    for ip in decision['targets']:
+                        try:
+                            if threat_intel.check_ip_abuse(ip):
+                                enriched.append(ip)
+                        except Exception:
+                            # On error, skip enrichment
+                            pass
+                    if enriched:
+                        decision['targets'] = enriched
+                        decision['reason'] += ' | threatintel: matched known malicious IPs'
+
+                # Send Slack/email notification about the executed action
+                alert_payload = {
+                    'host_id': host_id,
+                    'action': decision['action'],
+                    'targets': decision.get('targets', []),
+                    'reason': decision.get('reason', ''),
+                    'confidence': confidence,
+                    'threat_type': threat_type
+                }
+                try:
+                    notifications.send_slack_alert(alert_payload)
+                    notifications.send_email_alert(alert_payload)
+                except Exception as e:
+                    print(f"Error sending notifications: {e}")
+
+                # If we isolated the host, create an incident in GitHub (if configured)
+                if decision['action'] == 'isolate_machine':
+                    try:
+                        incidents.create_github_issue(
+                            title=f"Auto-Isolation: {host_id} - {threat_type}",
+                            body=(
+                                f"Host {host_id} was auto-isolated by Achilles Shield.\n"
+                                f"Threat: {threat_type}\n"
+                                f"Reason: {decision.get('reason', '')}\n"
+                                f"Confidence: {confidence}\n"
+                            ),
+                            labels=["incident", "auto-isolation"]
+                        )
+                    except Exception as e:
+                        print(f"Error creating incident issue: {e}")
+
+            except Exception as e:
+                print(f"Threat intel/notification integration failed: {e}")
+
         return decision
     
     def execute_response(self, decision: Dict, host_id: str) -> Dict:

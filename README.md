@@ -63,6 +63,12 @@ RESULT: Threat eliminated autonomously in ~45 seconds
 - Response execution tracked
 - Full forensic trail for compliance
 
+### 🔹 **Tier 1 Strategic Upgrades (Notifications, Threat Intel, Incidents)**
+- **Alerting:** Slack webhook & optional email alerts for executed responses (config via SLACK_WEBHOOK / SMTP_* env vars)
+- **Threat Intelligence:** Optional AbuseIPDB integration to enrich/block suspicious IPs (config via ABUSEIPDB_KEY)
+- **Incident Management:** Optional GitHub issue creation for automatic isolations (GITHUB_TOKEN + REPO_FULL_NAME)
+- These integrations are opt-in via environment variables to avoid overreach; nothing is sent externally unless configured.
+
 ---
 
 ## 🚀 Current Implementation Status
