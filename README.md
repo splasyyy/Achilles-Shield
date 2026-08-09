@@ -38,11 +38,17 @@ It provides **server/agent-based monitoring, anomaly detection, and future AI-dr
 
 ## 🔮 Roadmap & Vision
 
-### 🔄 Phase 3 — AI Threat Detection (Next Step)
-- **Anomaly Detection (AI/ML)** using scikit-learn (`IsolationForest`, `One-Class SVM`).  
-- Detect suspicious spikes, processes, or network activity.  
-- Threat logs separate from raw telemetry.  
-- Dashboard integration for flagged anomalies.  
+### 🔄 Phase 3 — AI Threat Detection ✅ (IMPLEMENTED)
+- **Anomaly Detection (AI/ML)** using scikit-learn (`IsolationForest`).  
+- Detect suspicious spikes in processes, CPU, RAM, disk usage, and network connections.  
+- Threat logs stored separately from raw telemetry in a dedicated `threats` table.  
+- Dashboard integration with real-time threat display (updated every 3 seconds).  
+- Per-host threat history available at `/threats/<host_id>`.  
+- **Features:**
+  - Automatic model training using historical data (minimum 20 samples per host).
+  - Background model retraining every 5 minutes for improved accuracy.
+  - Threat severity classification (low, medium, high).
+  - Both rule-based (thresholds) and ML-based (anomaly detection) methods.
 
 ### 🔜 Phase 4 — Active Defense
 - Server → Agent commands (kill processes, block IPs, isolate machine).  
@@ -58,7 +64,10 @@ It provides **server/agent-based monitoring, anomaly detection, and future AI-dr
 - **Flask** (server + dashboard)  
 - **SQLite** (lightweight database)  
 - **psutil** (agent telemetry)  
-- **Requests** (agent-server communication)    
+- **Requests** (agent-server communication)  
+- **scikit-learn** (ML-based anomaly detection)  
+- **joblib** (model persistence)  
+- **numpy** (numerical computations)  
 
 ---
 

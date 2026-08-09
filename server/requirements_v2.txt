@@ -2,3 +2,5 @@ flask
 scikit-learn
 numpy
 joblib
+requests
+psutil
