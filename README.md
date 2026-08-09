@@ -324,17 +324,21 @@ if severity == 'critical' and confidence > 0.7:  # ← Adjust 0.7 (70%)
 
 ---
 
-## 📚 Documentation Files
+## 📚 Documentation Files (moved to docs/)
+
+All documentation has been consolidated under the docs/ directory for a cleaner repository root.
 
 | File | Purpose |
 |------|---------|
-| `WHAT_I_BUILT_FOR_YOU.md` | High-level system overview |
-| `AUTONOMOUS_AI_DEFENSE_QUICKSTART.md` | 5-minute setup guide |
-| `AUTONOMOUS_AI_DEFENSE_EXPLAINED.md` | Beginner explanations |
-| `PHASE_4_AUTONOMOUS_AI_DEFENSE.md` | Complete technical reference |
-| `DOCUMENTATION_INDEX.md` | Navigation guide |
-| `PHASE_3_ARCHITECTURE.md` | ML architecture |
-| `TESTING_PHASE_3.md` | Testing procedures |
+| `docs/WHAT_I_BUILT_FOR_YOU.md` | High-level system overview |
+| `docs/AUTONOMOUS_AI_DEFENSE_QUICKSTART.md` | 5-minute setup guide |
+| `docs/AUTONOMOUS_AI_DEFENSE_EXPLAINED.md` | Beginner explanations |
+| `docs/PHASE_4_AUTONOMOUS_AI_DEFENSE.md` | Complete technical reference |
+| `docs/DOCUMENTATION_INDEX.md` | Navigation guide |
+| `docs/PHASE_3_ARCHITECTURE.md` | ML architecture |
+| `docs/TESTING_PHASE_3.md` | Testing procedures |
+
+To view all docs, open `docs/DOCUMENTATION_INDEX.md` or browse the docs/ folder.
 
 ---
 
