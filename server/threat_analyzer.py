@@ -14,10 +14,146 @@ import time
 OLLAMA_API = os.environ.get("OLLAMA_API", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama2:7b")
 
+class CompromiseTracker:
+    """Tracks compromised machines and escalates responses for persistent threats."""
+    
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self._init_compromise_table()
+    
+    def _init_compromise_table(self):
+        """Create compromised_machines table if it doesn't exist."""
+        try:
+            con = sqlite3.connect(self.db_path)
+            cur = con.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS compromised_machines (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host_id TEXT UNIQUE,
+                    first_compromise_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_threat_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    threat_count INTEGER DEFAULT 1,
+                    threat_types TEXT,
+                    status TEXT DEFAULT 'active',
+                    isolation_reason TEXT,
+                    notes TEXT
+                )
+            """)
+            con.commit()
+            con.close()
+        except Exception as e:
+            print(f"Error initializing compromise table: {e}")
+    
+    def check_compromise_history(self, host_id: str, threat_type: str) -> Tuple[bool, str]:
+        """
+        Check if host was previously compromised and determine if escalation needed.
+        Returns: (is_compromised, escalation_reason)
+        """
+        try:
+            con = sqlite3.connect(self.db_path)
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            cur.execute(
+                'SELECT * FROM compromised_machines WHERE host_id = ?',
+                (host_id,)
+            )
+            history = cur.fetchone()
+            con.close()
+            
+            if not history:
+                return False, ""
+            
+            threat_count = history['threat_count']
+            previous_threats = history['threat_types'].split(',') if history['threat_types'] else []
+            
+            # Escalation logic
+            if threat_count >= 2:
+                return True, f"Persistent threat (detected {threat_count} times)"
+            elif threat_type in previous_threats:
+                return True, f"Same threat type reappeared: {threat_type}"
+            
+            return True, f"Host previously compromised (count: {threat_count})"
+        except Exception as e:
+            print(f"Error checking compromise history: {e}")
+            return False, ""
+    
+    def log_compromise(self, host_id: str, threat_type: str, ai_confidence: float, 
+                       ai_analysis: str = "") -> None:
+        """Log a threat detection for a host."""
+        try:
+            con = sqlite3.connect(self.db_path)
+            cur = con.cursor()
+            
+            # Check if host already in table
+            cur.execute('SELECT threat_types FROM compromised_machines WHERE host_id = ?', (host_id,))
+            result = cur.fetchone()
+            
+            if result:
+                # Update existing entry
+                existing_threats = result[0].split(',') if result[0] else []
+                if threat_type not in existing_threats:
+                    existing_threats.append(threat_type)
+                new_threats = ','.join(existing_threats)
+                
+                cur.execute("""
+                    UPDATE compromised_machines 
+                    SET last_threat_time = CURRENT_TIMESTAMP,
+                        threat_count = threat_count + 1,
+                        threat_types = ?,
+                        notes = ?
+                    WHERE host_id = ?
+                """, (new_threats, ai_analysis[:200], host_id))
+            else:
+                # Insert new entry
+                cur.execute("""
+                    INSERT INTO compromised_machines 
+                    (host_id, threat_count, threat_types, notes)
+                    VALUES (?, 1, ?, ?)
+                """, (host_id, threat_type, ai_analysis[:200]))
+            
+            con.commit()
+            con.close()
+        except Exception as e:
+            print(f"Error logging compromise: {e}")
+    
+    def mark_isolated(self, host_id: str, reason: str) -> None:
+        """Mark a host as isolated."""
+        try:
+            con = sqlite3.connect(self.db_path)
+            cur = con.cursor()
+            cur.execute("""
+                UPDATE compromised_machines 
+                SET status = 'isolated', isolation_reason = ?
+                WHERE host_id = ?
+            """, (reason, host_id))
+            con.commit()
+            con.close()
+        except Exception as e:
+            print(f"Error marking host as isolated: {e}")
+    
+    def get_compromised_hosts(self) -> List[Dict]:
+        """Get all compromised machines."""
+        try:
+            con = sqlite3.connect(self.db_path)
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            cur.execute('SELECT * FROM compromised_machines ORDER BY last_threat_time DESC')
+            
+            hosts = []
+            for row in cur.fetchall():
+                hosts.append(dict(row))
+            con.close()
+            return hosts
+        except Exception as e:
+            print(f"Error getting compromised hosts: {e}")
+            return []
+
+
 class ThreatAnalyzer:
     def __init__(self, db_path):
         self.db_path = db_path
         self.analysis_cache = {}  # Cache analyses to avoid redundant calls
+        self.compromise_tracker = CompromiseTracker(db_path)
         
     def get_telemetry_context(self, host_id: str, limit: int = 10) -> List[Dict]:
         """Get recent telemetry for a host to understand patterns."""
@@ -216,19 +352,23 @@ class AutonomousResponseEngine:
     """
     Autonomous system that decides how to respond to threats
     and executes appropriate actions.
+    Includes escalation logic for persistent threats and recurrent attacks.
     """
     
     def __init__(self, db_path):
         self.db_path = db_path
+        self.compromise_tracker = CompromiseTracker(db_path)
     
     def decide_response(self, analysis: Dict, host_id: str) -> Dict:
         """
         Decide autonomous response based on threat analysis.
+        Includes escalation for persistent/recurrent threats.
         Returns: {
             'action': 'block_ip' | 'kill_process' | 'isolate_machine' | 'alert_only',
             'targets': ['process_name'] or ['ip_address'],
             'execute': True/False (based on severity threshold),
-            'reason': 'Why taking this action'
+            'reason': 'Why taking this action',
+            'escalated': True/False
         }
         """
         
@@ -240,12 +380,31 @@ class AutonomousResponseEngine:
         print(f"\n🎯 Autonomous Response Engine deciding action...")
         print(f"   Threat: {threat_type} | Severity: {severity} | Confidence: {confidence}")
         
+        # CHECK COMPROMISE HISTORY - ESCALATE IF PERSISTENT
+        is_compromised, escalation_reason = self.compromise_tracker.check_compromise_history(
+            host_id, threat_type
+        )
+        
+        if is_compromised:
+            print(f"⚠️  HOST PREVIOUSLY COMPROMISED: {escalation_reason}")
+            # Escalate to isolation for persistent threats
+            decision = {
+                'action': 'isolate_machine',
+                'targets': [host_id],
+                'execute': True,
+                'reason': f'🚨 ESCALATION: {escalation_reason}. Isolating host immediately.',
+                'escalated': True
+            }
+            self.compromise_tracker.mark_isolated(host_id, escalation_reason)
+            return decision
+        
         # Decision logic
         decision = {
             'action': 'alert_only',
             'targets': [],
             'execute': False,
-            'reason': 'Insufficient confidence'
+            'reason': 'Insufficient confidence',
+            'escalated': False
         }
         
         # HIGH SEVERITY + HIGH CONFIDENCE = AUTO-EXECUTE
@@ -255,14 +414,16 @@ class AutonomousResponseEngine:
                     'action': 'isolate_machine',
                     'targets': [host_id],
                     'execute': True,
-                    'reason': f'CRITICAL: DDOS agent detected (confidence: {confidence}). Isolating immediately.'
+                    'reason': f'CRITICAL: DDOS agent detected (confidence: {confidence}). Isolating immediately.',
+                    'escalated': False
                 }
             elif threat_type == 'ransomware':
                 decision = {
                     'action': 'isolate_machine',
                     'targets': [host_id],
                     'execute': True,
-                    'reason': f'CRITICAL: Ransomware detected (confidence: {confidence}). Isolating to prevent spread.'
+                    'reason': f'CRITICAL: Ransomware detected (confidence: {confidence}). Isolating to prevent spread.',
+                    'escalated': False
                 }
         
         # HIGH SEVERITY + MEDIUM CONFIDENCE = KILL PROCESS + ALERT
@@ -273,14 +434,16 @@ class AutonomousResponseEngine:
                     'action': 'kill_process',
                     'targets': suspicious_procs if suspicious_procs else ['unknown_process'],
                     'execute': True,
-                    'reason': f'HIGH: Cryptominer detected. Killing suspicious processes: {suspicious_procs}'
+                    'reason': f'HIGH: Cryptominer detected. Killing suspicious processes: {suspicious_procs}',
+                    'escalated': False
                 }
             elif threat_type == 'ddos_agent':
                 decision = {
                     'action': 'isolate_machine',
                     'targets': [host_id],
                     'execute': True,
-                    'reason': f'HIGH: DDoS agent detected. Isolating machine.'
+                    'reason': f'HIGH: DDoS agent detected. Isolating machine.',
+                    'escalated': False
                 }
             elif recommendation == 'block_ip':
                 suspicious_ips = analysis.get('suspicious_connections', [])
@@ -288,7 +451,8 @@ class AutonomousResponseEngine:
                     'action': 'block_ip',
                     'targets': suspicious_ips,
                     'execute': True,
-                    'reason': f'HIGH: Blocking suspicious IPs: {suspicious_ips}'
+                    'reason': f'HIGH: Blocking suspicious IPs: {suspicious_ips}',
+                    'escalated': False
                 }
         
         # MEDIUM SEVERITY + HIGH CONFIDENCE = BLOCK IPS + ALERT
@@ -299,14 +463,16 @@ class AutonomousResponseEngine:
                     'action': 'block_ip',
                     'targets': suspicious_ips,
                     'execute': True,
-                    'reason': f'MEDIUM: Blocking suspected malicious IPs (high confidence).'
+                    'reason': f'MEDIUM: Blocking suspected malicious IPs (high confidence).',
+                    'escalated': False
                 }
             else:
                 decision = {
                     'action': 'alert_only',
                     'targets': [],
                     'execute': False,
-                    'reason': f'MEDIUM severity - alerting for human review.'
+                    'reason': f'MEDIUM severity - alerting for human review.',
+                    'escalated': False
                 }
         
         # LOW SEVERITY OR LOW CONFIDENCE = ALERT ONLY
@@ -315,8 +481,15 @@ class AutonomousResponseEngine:
                 'action': 'alert_only',
                 'targets': [],
                 'execute': False,
-                'reason': f'Insufficient threat level (severity: {severity}, confidence: {confidence}). Alerting only.'
+                'reason': f'Insufficient threat level (severity: {severity}, confidence: {confidence}). Alerting only.',
+                'escalated': False
             }
+        
+        # Log threat to compromise tracker
+        if decision['execute']:
+            self.compromise_tracker.log_compromise(
+                host_id, threat_type, confidence, analysis.get('root_cause', '')
+            )
         
         return decision
     
