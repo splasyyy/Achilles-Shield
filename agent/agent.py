@@ -1,13 +1,19 @@
 # agent/agent.py  (BEGIN)
-import os, time, socket, platform, json
+import os, time, socket, platform, json, threading
 import psutil, requests
+from autonomous_defense import AutonomousDefense
 
-SERVER_URL = os.environ.get("SERVER_URL", "http://127.0.0.1:5000/ingest")
+SERVER_URL = os.environ.get("SERVER_URL", "http://127.0.0.1:5000")
+INGEST_URL = SERVER_URL + "/ingest"
 API_KEY = os.environ.get("API_KEY", "supersecret")
 HOST_ID = os.environ.get("HOST_ID", socket.gethostname())
-INTERVAL = int(os.environ.get("INTERVAL", "2"))  # was "10"
+INTERVAL = int(os.environ.get("INTERVAL", "2"))
+
+# Initialize autonomous defense
+defense = AutonomousDefense()
 
 def collect():
+    """Collect system telemetry data."""
     info = {
         "host_id": HOST_ID,
         "ts": time.time(),
@@ -69,19 +75,63 @@ def collect():
     return info
 
 def send(payload):
+    """Send telemetry to server."""
     headers = {"Content-Type": "application/json", "X-API-KEY": API_KEY}
     try:
-        r = requests.post(SERVER_URL, json=payload, headers=headers, timeout=5)
+        r = requests.post(INGEST_URL, json=payload, headers=headers, timeout=5)
         return r.status_code == 200
     except Exception as e:
         print("send error:", e)
         return False
 
-if __name__ == "__main__":
-    print("Agent starting, sending to", SERVER_URL, "as", HOST_ID)
+def check_commands():
+    """Check for autonomous defense commands from server."""
+    try:
+        headers = {"X-API-KEY": API_KEY}
+        r = requests.get(
+            f"{SERVER_URL}/get_defense_commands?host_id={HOST_ID}",
+            headers=headers,
+            timeout=5
+        )
+        if r.status_code == 200:
+            commands = r.json().get('commands', [])
+            for command in commands:
+                print(f"\n🎯 Executing autonomous defense command: {command.get('action')}")
+                result = defense.execute_command(command)
+                defense.report_action(result)
+    except Exception as e:
+        pass  # Silently ignore connection errors
+
+def run_defense_loop():
+    """Background thread: Check for defense commands."""
     while True:
-        data = collect()
-        ok = send(data)
-        print("sent:", ok, "processes:", len(data['processes']))
-        time.sleep(INTERVAL)
+        check_commands()
+        time.sleep(5)  # Check every 5 seconds
+
+if __name__ == "__main__":
+    print(f"\n🛡️  Achilles Shield Agent Starting")
+    print(f"   Host: {HOST_ID}")
+    print(f"   Server: {SERVER_URL}")
+    print(f"   Telemetry Interval: {INTERVAL}s")
+    print(f"   Defense Check: 5s")
+    print(f"   Autonomous Defense: ENABLED")
+    
+    # Start defense command checker in background thread
+    defense_thread = threading.Thread(target=run_defense_loop, daemon=True)
+    defense_thread.start()
+    print("✅ Autonomous Defense System Ready\n")
+    
+    # Main telemetry loop
+    while True:
+        try:
+            data = collect()
+            ok = send(data)
+            print(f"✓ Telemetry sent | Processes: {len(data['processes'])} | CPU: {data['cpu']:.1f}% | RAM: {data['ram']['percent']:.1f}%")
+            time.sleep(INTERVAL)
+        except KeyboardInterrupt:
+            print("\n🛑 Agent stopped")
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+            time.sleep(INTERVAL)
 # agent/agent.py  (END)
