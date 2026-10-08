@@ -1,22 +1,86 @@
-# AUTONOMOUS_AI_DEFENSE_QUICKSTART.md
-
-# 🤖 Autonomous AI Defense System - Quick Start (5 Minutes)
+# Autonomous AI Defense Quick Start
 
 ## What You're Getting
 
-A **self-defending cybersecurity system** that:
+A local-first endpoint defense prototype that:
 
-1. **Watches** all hosts for suspicious activity
-2. **Analyzes** what's happening using real AI (LLM)
-3. **Decides** what to do automatically
-4. **Acts** to block threats in real-time
-5. **Logs** everything for compliance
+1. Collects telemetry from connected agents.
+2. Uses rules, anomaly signals, and optional local AI analysis to surface activity.
+3. Authorizes only actions permitted by deterministic server-side policy.
+4. Revalidates exact process identity and reports endpoint outcomes for audit.
 
 ---
 
-## ⚡ 5-Minute Setup
+## Before you begin
 
-### Step 1: Install Ollama (Free LLM Framework)
+The setup includes Python dependency installation. Ollama and its model are
+optional; the `llama2:7b` model uses several gigabytes of storage. Review its
+size before you choose to download it. No software or model is installed or
+downloaded automatically by these instructions.
+
+## Response safety controls
+
+Routine process mitigation remains automatic only when telemetry identifies a process
+whose name matches a built-in suspicious marker (`hack`, `malware`, `keylog`, `miner`,
+`virus`, or `trojan`). The action is bound to the exact PID, process name, and process
+start time (microsecond precision) reported by the agent; the agent rechecks all three
+before terminating it. The command is also bound to its telemetry host ID, and agents
+reject commands addressed to a different host.
+Protected operating-system processes and critical PIDs are excluded. LLM
+recommendations and repeat detections alone cannot authorize destructive actions.
+
+Machine isolation has a separate opt-in and requires an external-connection burst
+(six or more distinct globally routable IPs) plus at least one independent signal in
+the same telemetry sample: a suspicious process name, or CPU at least 95% while at
+least 200 processes are reported.
+Before disconnecting the host, the agent checks that the same two signal categories
+including the external-connection burst are still present in fresh local telemetry.
+Set `DEFENSE_ISOLATION_ENABLED=true` in
+both server and agent environments to allow this response; it is off by default.
+An authorized isolation disables active network interfaces/services and may interrupt
+remote access. Run the agent with permissions to disable network interfaces/services;
+failures are recorded per interface and reported as partial or failed isolation when
+the server remains reachable. After investigating, restore connectivity locally:
+enable the adapter in Windows Network Settings, run `ip link set dev <name> up` on
+Linux, or re-enable the service in macOS Network Settings.
+
+The dashboard links to per-host analysis and action history. The history distinguishes
+what the server authorized from what the agent reported executing; a server decision
+is not proof that the endpoint action succeeded.
+Authorized commands are stored in the server database and remain outstanding until a
+matching agent report arrives. A delivery is retried if it has not been acknowledged
+within 60 seconds, using the same command ID and exact targets; agents revalidate
+process identity before every attempt. The server rejects reports whose command ID,
+host, or action does not match.
+Agents keep unreported outcomes in a local SQLite outbox (by default under
+`%LOCALAPPDATA%\AchillesShield\agent_state.db` on Windows, or the home directory on
+other platforms). Set `AGENT_STATE_DB` to choose another path. Successfully reported
+outcomes are retained locally for up to 30 days, then pruned.
+Before handling a command with an ID, the agent durably records its execution intent.
+If it restarts with an intent but no saved outcome, it reports the result as unknown
+and does not retry the action, because the action may already have occurred. While
+the recorded agent process is still running, duplicate delivery is deferred rather
+than reported or executed again. Check endpoint state and audit evidence before
+taking further action for an interrupted command.
+
+Set `DEFENSE_ENABLED=false` to disable all automated response, or
+`DEFENSE_SAFE_MODE=true` to pause it. Set the variable in **both the server and each
+agent's environment before starting them**. Defense is enabled by default to preserve
+existing deployments. When the server is in safe mode, it cancels outstanding
+commands so they will not be delivered again; an agent started in safe mode also
+rejects commands if the server is unavailable or bypassed. Previously delivered
+commands may still report their outcome. Extend the protected-name defaults in both environments with
+`PROTECTED_PROCESS_NAMES`, a comma-separated list of process names.
+For non-disruptive staging checks, set `DEFENSE_DRY_RUN=true` in the agent environment.
+The agent still validates the command, process identity, or isolation evidence and
+reports `dry_run`, but does not terminate processes or disable network interfaces.
+Unset the variable and restart the agent to enable authorized mitigation.
+Run `python agent/agent.py --check` before starting the agent to verify that its local
+state database is accessible and the configured server URL/API key can reach the
+authenticated, read-only health endpoint. This check does not poll queued commands,
+send telemetry, or perform mitigation.
+
+### Optional: Install Ollama for local LLM analysis
 
 **Windows:**
 - Download: https://ollama.ai/download
@@ -31,15 +95,14 @@ A **self-defending cybersecurity system** that:
 curl https://ollama.ai/install.sh | sh
 ```
 
-### Step 2: Download Llama 2 (Free AI Model)
+### Step 2: (Optional) Download a local model
 
 ```bash
 ollama pull llama2:7b
-# This downloads a 4GB model (15 min - 1 hour depending on internet)
-# It's FREE and runs entirely on your computer
+# This downloads several gigabytes; check available storage first.
 ```
 
-### Step 3: Start Ollama Server
+### Optional: Start Ollama Server
 
 Open a terminal/command prompt and run:
 ```bash
@@ -54,114 +117,84 @@ cd server
 pip install -r requirements_v2.txt
 ```
 
-### Step 5: Start the Autonomous Defense Server
+### Step 5: Start the server
 
 New terminal/command prompt:
-```bash
+```bat
 cd server
-set API_KEY=supersecret
+set API_KEY=replace-with-a-long-random-secret
 python server_v2_ai_autonomous.py
 ```
 
-You should see:
-```
-============================================================
-🛡️  ACHILLES SHIELD - AI AUTONOMOUS DEFENSE SYSTEM
-============================================================
-✅ Phase 3: ML Anomaly Detection
-✅ Phase 4: AI-Powered Threat Analysis
-✅ Phase 5: Autonomous Response Execution
-============================================================
-Server running on http://127.0.0.1:5000
-```
+Keep the server and agent `API_KEY` values identical. Use a unique secret,
+including for local testing.
 
 ### Step 6: Start the Agent
 
 New terminal/command prompt:
-```bash
+```bat
 cd agent
 set SERVER_URL=http://127.0.0.1:5000
-set API_KEY=supersecret
+set API_KEY=replace-with-a-long-random-secret
 set HOST_ID=test-machine
+rem Start in dry-run mode; commands are validated but not executed
+set DEFENSE_DRY_RUN=true
+rem Optional safety check: validates connectivity without polling or mitigation
+python agent.py --check
 python agent.py
 ```
 
-You should see:
-```
-🛡️  Achilles Shield Agent Starting
-   Host: test-machine
-   Server: http://127.0.0.1:5000
-   Autonomous Defense: ENABLED
-✅ Autonomous Defense System Ready
-```
+Leave `DEFENSE_DRY_RUN=true` while validating the setup. To enable isolation,
+first review its impact and recovery requirements, then explicitly set
+`DEFENSE_ISOLATION_ENABLED=true` in both server and agent environments.
 
 ---
 
-## 🎯 How It Works (Simple)
+## How it works
 
 ```
-Your Computer (Agent)
-↓ sends telemetry every 2 seconds
-  (CPU: 45%, RAM: 60%, processes running, network connections, etc.)
-↓
-
-Server (AI Brain)
-├─ Step 1: Quick check - "Is anything obviously wrong?" (instant)
-├─ Step 2: ML check - "Is this normal for this computer?" (instant)
-├─ Step 3: AI analysis - "What's actually happening?" (30 seconds)
-│  └─ Sends data to Ollama/Llama2
-│  └─ LLM analyzes and says: "Cryptominer! 92% sure!"
-├─ Step 4: Decision - "What should we do?" (instant)
-│  └─ If threat is bad + AI is confident → Execute response
-└─ Step 5: Action - "Kill those processes! Block those IPs!"
-   └─ Sends command to agent
-
-Agent Receives Command
-├─ "Kill process X and Y"
-├─ Terminates processes
-├─ Reports back "Done!"
-└─ Reports to server for logging
-
-Result: Threat neutralized in < 1 minute, all logged for audit
+Agent                          Server
+  |                              |
+  |------ telemetry ------------>|
+  |                              |-- analyze and record activity
+  |                              |-- independently authorize only
+  |                              |   policy-approved actions
+  |<----- queued command --------|
+  |-- revalidate exact target    |
+  |-- execute, dry-run, or reject|
+  |------ report outcome ------->|
 ```
+
+AI output is informational; it does not authorize process termination or host
+isolation. Process termination requires a reported process matching the
+configured suspicious-name markers and is limited to exact PID, name, and
+start-time identity. Isolation is separately opt-in, evidence-gated, and
+revalidated against fresh local telemetry. IP blocking is not an implemented
+automatic response action.
 
 ---
 
-## 🚨 Testing It (Optional)
+## Testing
 
-### Simulate Cryptominer
+Start with the focused regression suite from the repository root:
 
-Open a new terminal and run:
 ```bash
-# Create a CPU-intensive process
-python -c "while True: x = 2**1000000"
+python -m unittest tests.test_response_safety tests.test_server_flow -q
 ```
 
-Watch the server output:
-```
-🔍 Starting AI Analysis for test-machine...
-🤖 AI Analysis Complete:
-   Threat: high_cpu_anomaly
-   Confidence: 0.65
-   Root Cause: "Unusual CPU spike...
-
-⚙️  Decision: ...
-🎯 Command queued for agent
-```
-
-The AI recognizes the unusual behavior and suggests actions!
+For a local connectivity check, run `python agent.py --check` from the `agent`
+directory. To verify response handling without mitigation, set
+`DEFENSE_DRY_RUN=true` for the agent. Do not use a CPU-burn loop or real malware
+as a test input.
 
 ---
 
 ## 📊 View the Dashboard
 
-Open browser: **http://localhost:5000/**
+Open browser: **http://127.0.0.1:5000/**
 
-You'll see:
-- **Hosts**: All connected machines with their stats
-- **AI-Detected Threats**: What the AI found suspicious
-- **AI Analysis**: Detailed reasoning about each threat
-- **Autonomous Actions**: What the system did/will do
+The dashboard shows connected hosts, recent detections, AI analysis when
+available, server authorizations, and endpoint-reported action outcomes.
 
 Click on a host to see:
 - Full threat history
@@ -179,84 +212,49 @@ Click on a host to see:
 - Mathematical, not AI-based
 
 ### Llama 2 (LLM AI)
-- Real artificial intelligence
-- Understands security threats
-- Analyzes what's happening and why
-- Slow-ish (30 seconds, but thorough)
+- Optional local model for generated analysis
+- Output can be inaccurate and is informational, not a response authorization
+- Response time and quality depend on the selected model and hardware
 
-### Decision Engine
-- Combines ML + LLM results
-- Applies confidence thresholds
-- Decides if threat is serious enough to auto-respond
-- Executes only when confident enough
+### Response authorization
+- Uses deterministic server-side policy and observed telemetry.
+- LLM recommendations and confidence scores do not grant authorization.
+- Protected processes and critical PIDs are excluded from process termination.
+- Network isolation requires explicit opt-in and independent evidence.
 
 ### Autonomous Responses
 ```
-Action 1: KILL_PROCESS
-  ├─ Kills suspicious programs
-  └─ Stops malware/miners
-  
-Action 2: BLOCK_IP
-  ├─ Blocks outbound connections to bad IPs
-  └─ Prevents C2 communication
-  
-Action 3: ISOLATE_MACHINE
-  ├─ Disconnects computer from network
-  └─ Last resort for critical threats
+KILL_PROCESS    Exact observed process; identity rechecked by the agent
+ISOLATE_MACHINE Opt-in, stronger evidence, and fresh local corroboration
 ```
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
-### Use Faster AI (Sacrifice Accuracy)
-```bash
-ollama pull mistral:7b
-# In server_v2_ai_autonomous.py, set:
-# OLLAMA_MODEL = "mistral:7b"
+### Select the local analysis model
+```bat
+set OLLAMA_MODEL=llama2:7b
 ```
 
-### Use More Powerful AI (Needs GPU)
-```bash
-ollama pull llama2:13b
-# Requires more VRAM but much smarter analysis
-```
-
-### Change Response Aggressiveness
-
-Edit `server/threat_analyzer.py`:
-
-**Conservative** (alert more, execute less):
-```python
-if severity == 'high' and confidence > 0.85:  # Needs 85% certainty
-    execute = True
-```
-
-**Balanced** (current default):
-```python
-if severity == 'high' and confidence > 0.6:  # Needs 60% certainty
-    execute = True
-```
-
-**Aggressive** (execute more readily):
-```python
-if severity == 'high' and confidence > 0.5:  # Needs 50% certainty
-    execute = True
-```
+Set `OLLAMA_API` and `OLLAMA_MODEL` in the server environment. Changing the
+analysis model does not change response authorization policy. To extend the
+protected-process defaults, set `PROTECTED_PROCESS_NAMES` in both server and
+agent environments; use comma-separated process names.
 
 ---
 
 ## 📝 What Gets Logged
 
-Every threat detection is logged:
+The server stores analysis and response authorization records; endpoint reports
+are recorded separately:
 - **When** it happened
-- **What** the threat was
-- **How confident** the AI is (0-100%)
-- **Why** it's a threat (root cause analysis)
-- **What action** was taken
-- **Result** of the action
+- **What** activity was observed and analyzed
+- **Why** the server authorized or declined an action
+- **What** outcome the agent reported, if any
 
-All data stored in SQLite database for compliance/audit.
+These records support investigation; they do not by themselves establish
+compliance or prove that an authorized action succeeded.
 
 ---
 
@@ -264,10 +262,10 @@ All data stored in SQLite database for compliance/audit.
 
 ### Ollama not connecting?
 ```bash
-# Check if Ollama is running:
-curl http://localhost:11434/api/generate
+# Check whether a model is available:
+ollama list
 
-# If error, start Ollama:
+# Start the service if needed:
 ollama serve
 ```
 
@@ -290,71 +288,41 @@ ollama list
 # Make sure server is running on :5000
 ```
 
-### AI taking too long?
-This is normal - first run might take 30 seconds while Llama thinks.
-After first run, it caches responses faster.
+### AI analysis is slow or unavailable?
+Local model latency depends on hardware and model size. AI analysis is optional;
+its output does not change the deterministic response authorization policy.
 
 ---
 
-## 📈 Real-World Scenario
+## Before enabling response on real endpoints
 
-**What happens when a cryptominer infects a host:**
-
-```
-⏰ 0:00 - Cryptominer starts running
-⏰ 0:02 - Agent sends telemetry: CPU 95%, 250 processes
-⏰ 0:03 - Server rule-based check: "CPU > 90% ALERT!"
-⏰ 0:05 - Server ML check: "This is very abnormal for this host!"
-⏰ 0:06 - Server AI analysis starts
-⏰ 0:30 - Llama 2 responds: "CRYPTOMINER detected! 92% sure!"
-⏰ 0:31 - Decision: "92% confidence + HIGH severity = EXECUTE"
-⏰ 0:32 - Command queued for agent: "Kill mining processes"
-⏰ 0:37 - Agent receives command (checks every 5 seconds)
-⏰ 0:38 - Agent executes: Kills 2 mining processes
-⏰ 0:39 - Agent reports: "Done! Killed svchost.exe, rundll32.exe"
-⏰ 0:40 - Next telemetry arrives: CPU 35% (normal again!)
-
-RESULT: Threat neutralized in ~40 seconds, FULLY AUTOMATED! ✅
-```
-
----
-
-## 🚀 Moving to Production
-
-1. **Test locally first** - Make sure everything works
-2. **Monitor false positives** - Adjust thresholds if needed
-3. **Deploy agents to production hosts**
-4. **Let it run in "alert only" mode for 1 week** - Watch for false alarms
-5. **Enable auto-execute mode** - Turn on autonomous responses
-6. **Set up alerts** - Get Slack/email notifications for high-severity threats
-7. **Review logs weekly** - Audit trail for compliance
+1. Run the focused tests and review the current response policy in
+   `server/threat_analyzer.py` and `agent/autonomous_defense.py`.
+2. Exercise setup and connectivity in an isolated environment.
+3. Set `DEFENSE_DRY_RUN=true` on agents and inspect reported dry-run outcomes.
+4. Keep isolation disabled unless its operational impact is understood and
+   explicitly approved by the operator.
+5. Define an incident process for unknown, partial, failed, or rejected outcomes.
+6. Enable response only after reviewing protected-process names, permissions,
+   storage, and remote-access recovery procedures.
 
 ---
 
 ## 💡 Remember
 
-This system:
-- ✅ Can detect threats faster than humans
-- ✅ Can respond faster than humans
-- ✅ Never gets tired or distracted
-- ✅ Logs everything for compliance
-- ✅ Requires no manual intervention
-- ✅ Can handle thousands of hosts
-
-But it:
-- ⚠️ Should be monitored initially (false positives are possible)
-- ⚠️ Needs appropriate confidence thresholds
-- ⚠️ Should have human oversight for critical decisions
-- ⚠️ Requires incident response procedures
+This is an evolving prototype. Detection can produce false positives, and
+authorization is not proof of successful execution. Monitor outcomes and retain
+human oversight; do not treat the project as production-ready or certified.
 
 ---
 
 ## 📞 Help
 
 **Check these files:**
-- `PHASE_4_AUTONOMOUS_AI_DEFENSE.md` - Full technical details
-- `server_v2_ai_autonomous.py` - Code comments explain everything
-- `threat_analyzer.py` - Where AI decisions are made
+- `README.md` — overview and entry points
+- `AUTONOMOUS_AI_DEFENSE_EXPLAINED.md` — conceptual background (not a policy reference)
+- `server/threat_analyzer.py` — server-side policy and analysis
+- `agent/autonomous_defense.py` — agent-side validation and execution
 
 **Check logs:**
 ```bash
@@ -364,9 +332,3 @@ But it:
 ```
 
 ---
-
-**You now have an AI-powered security system! 🛡️**
-
-It works 24/7, never sleeps, and responds faster than any human team.
-
-Let's make cybersecurity autonomous!

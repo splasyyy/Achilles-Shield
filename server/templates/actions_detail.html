@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Action audit · {{ host_id }} · Achilles Shield</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">A</span><span><span class="brand-name">Achilles Shield</span><span class="brand-subtitle" style="display:block">Endpoint defense</span></span></a>
+      <nav class="nav" aria-label="Host navigation"><a href="/">Overview</a><a href="/agent/{{ host_id }}">Endpoint</a><a href="/analysis/{{ host_id }}">Analysis</a></nav>
+    </header>
+    <section class="page-heading">
+      <div class="eyebrow">Audit trail</div>
+      <h1>Response activity</h1>
+      <p class="subtitle">Authorization and reported execution for <strong>{{ host_id }}</strong>.</p>
+    </section>
+    {% if actions|selectattr('status', 'equalto', 'unknown')|list %}
+      <p class="warning"><strong>Outcome unknown.</strong> An action may have occurred before the agent stopped. Verify endpoint state and audit evidence before taking further action; the agent will not automatically retry it.</p>
+    {% endif %}
+    <section class="panel table-wrap">
+      {% if actions %}
+      <table>
+        <thead><tr><th>Time</th><th>Record</th><th>Action</th><th>Outcome</th><th>Threat</th><th>Reason / details</th></tr></thead>
+        <tbody>{% for action in actions %}
+          <tr>
+            <td class="number nowrap" title="Unix timestamp {{ action.ts|float|round(3) }}">
+              {% set age = [0, (now - action.ts)|int]|max %}
+              {% if age < 60 %}{{ age }}s ago{% elif age < 3600 %}{{ (age / 60)|int }}m ago{% elif age < 86400 %}{{ (age / 3600)|int }}h ago{% else %}{{ (age / 86400)|int }}d ago{% endif %}
+            </td>
+            <td>{{ action.source|replace('_', ' ') }}</td>
+            <td class="primary-cell">{{ action.action|replace('_', ' ')|title }}</td>
+            <td><span class="status {{ action.status|lower|replace('_', '-') }}">{{ action.status|replace('_', ' ') }}</span></td>
+            <td>{{ action.threat_type|replace('_', ' ')|title }}</td>
+            <td class="details-cell">{{ action.reason }}{% if action.reason and action.result %}<br>{% endif %}<span class="muted">{{ action.result }}</span></td>
+          </tr>
+        {% endfor %}</tbody>
+      </table>
+      {% else %}
+        <div class="empty-state"><span class="empty-title">No response activity</span>Server authorizations and agent outcomes will appear here.</div>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

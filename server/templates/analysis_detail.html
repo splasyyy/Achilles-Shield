@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Analysis · {{ host_id }} · Achilles Shield</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">A</span><span><span class="brand-name">Achilles Shield</span><span class="brand-subtitle" style="display:block">Endpoint defense</span></span></a>
+      <nav class="nav" aria-label="Host navigation"><a href="/">Overview</a><a href="/agent/{{ host_id }}">Endpoint</a><a href="/actions/{{ host_id }}">Action audit</a></nav>
+    </header>
+    <section class="page-heading">
+      <div class="eyebrow">Investigation</div>
+      <h1>Analysis</h1>
+      <p class="subtitle">AI-generated context for <strong>{{ host_id }}</strong>. Recommendations are informational, not response authorization.</p>
+    </section>
+    {% if analyses %}
+      {% for analysis in analyses %}
+      <article class="analysis-card">
+        <div class="section-heading">
+          <div>
+            <div class="eyebrow">Threat assessment</div>
+            <h2>{{ analysis.threat_type|replace('_', ' ')|title }}</h2>
+          </div>
+          <span class="severity {{ analysis.threat_type|lower }}">{{ (analysis.confidence * 100)|round(1) }}% confidence</span>
+        </div>
+        <div class="analysis-meta">
+          <span title="Unix timestamp {{ analysis.ts|float|round(3) }}">
+            {% set age = [0, (now - analysis.ts)|int]|max %}
+            {% if age < 60 %}{{ age }} seconds ago{% elif age < 3600 %}{{ (age / 60)|int }} minutes ago{% else %}{{ (age / 3600)|int }} hours ago{% endif %}
+          </span>
+          <span class="tag">Recommendation · {{ analysis.recommendation|replace('_', ' ') }}</span>
+        </div>
+        <p class="analysis-summary">{{ analysis.root_cause|default('No root-cause summary available.') }}</p>
+        <details><summary>View structured analysis data</summary><pre>{{ analysis.analysis_data|tojson(indent=2) }}</pre></details>
+      </article>
+      {% endfor %}
+    {% else %}
+      <div class="panel empty-state"><span class="empty-title">No analyses recorded</span>There are no analysis records for this endpoint yet.</div>
+    {% endif %}
+  </main>
+</body>
+</html>

@@ -9,8 +9,13 @@ import sqlite3
 import json
 import time
 import threading
+import uuid
+from contextlib import closing
 from flask import Flask, request, jsonify, render_template, redirect, url_for
-from threat_analyzer import ThreatAnalyzer, AutonomousResponseEngine, log_response_action
+from threat_analyzer import (
+    ThreatAnalyzer, AutonomousResponseEngine, defense_actions_enabled,
+    log_response_action, persist_agent_action_report
+)
 
 DB = os.path.join(os.path.dirname(__file__), "data.db")
 API_KEY = os.environ.get("API_KEY", "changeme")
@@ -19,8 +24,9 @@ app = Flask(__name__, template_folder="templates")
 threat_analyzer = ThreatAnalyzer(DB)
 response_engine = AutonomousResponseEngine(DB)
 
-# Queue for pending defense commands
-pending_commands = {}  # {host_id: [commands]}
+COMMAND_DELIVERY_LEASE_SECONDS = 60
+MAX_COMMANDS_PER_POLL = 50
+defense_commands_lock = threading.Lock()
 
 def init_db():
     """Initialize database with all required tables."""
@@ -71,6 +77,36 @@ def init_db():
                     action_taken TEXT,
                     execution_result TEXT
                 )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS agent_action_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host_id TEXT NOT NULL,
+                    reported_at REAL NOT NULL,
+                    command TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    details TEXT NOT NULL,
+                    command_id TEXT
+                )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS defense_commands (
+                    command_id TEXT PRIMARY KEY,
+                    host_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    command_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at REAL NOT NULL,
+                    last_delivered_at REAL,
+                    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+                    reported_at REAL
+                )""")
+    cur.execute("""CREATE INDEX IF NOT EXISTS idx_defense_commands_delivery
+                    ON defense_commands(host_id, status, last_delivered_at)""")
+    cur.execute("PRAGMA table_info(agent_action_log)")
+    agent_action_columns = {row[1] for row in cur.fetchall()}
+    if "command_id" not in agent_action_columns:
+        cur.execute("ALTER TABLE agent_action_log ADD COLUMN command_id TEXT")
+    cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_action_command_id
+                    ON agent_action_log(command_id) WHERE command_id IS NOT NULL""")
     
     con.commit()
     con.close()
@@ -155,26 +191,47 @@ def ingest():
         print(f"   Severity: {ai_analysis['severity']}")
         
         # Get autonomous decision
-        decision = response_engine.decide_response(ai_analysis, host)
+        decision = response_engine.decide_response(ai_analysis, host, payload)
         print(f"\n⚙️  Decision: {decision['reason']}")
         
-        # Execute response
-        execution_result = response_engine.execute_response(decision, host)
+        # Authorize the response for agent delivery; the agent reports execution separately.
+        authorization_result = response_engine.execute_response(decision, host, payload)
         
+        # Release the ingest write transaction before the audit helper opens its own connection.
+        con.commit()
+
         # Log everything for audit
-        log_response_action(DB, host, ai_analysis, decision, execution_result)
+        log_response_action(DB, host, ai_analysis, decision, authorization_result)
         
-        # Queue commands for agent if execution was approved
-        if decision['execute']:
+        # Queue commands only after server-side authorization.
+        if authorization_result['authorized']:
             command = {
+                'command_id': uuid.uuid4().hex,
                 'action': decision['action'],
                 'targets': decision['targets'],
-                'reason': decision['reason']
+                'reason': decision['reason'],
+                'host_id': host,
+                'evidence': decision.get('evidence', [])
             }
-            if host not in pending_commands:
-                pending_commands[host] = []
-            pending_commands[host].append(command)
-            print(f"📤 Command queued for agent")
+            cur.execute(
+                """SELECT 1 FROM defense_commands
+                   WHERE host_id = ? AND action = 'isolate_machine'
+                     AND status IN ('pending', 'delivered')
+                   LIMIT 1""",
+                (host,),
+            )
+            isolation_already_pending = cur.fetchone() is not None
+            if command['action'] != 'isolate_machine' or not isolation_already_pending:
+                cur.execute(
+                    """INSERT INTO defense_commands
+                       (command_id, host_id, action, command_json, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        command['command_id'], host, command['action'],
+                        json.dumps(command), time.time(),
+                    ),
+                )
+                print(f"📤 Command persisted for agent delivery")
         
         # Store as threat
         threat_desc = f"{ai_analysis['threat_type']} ({ai_analysis['severity']}) - {ai_analysis['root_cause']}"
@@ -200,18 +257,67 @@ def ingest():
     
     return jsonify({"ok": True}), 200
 
+@app.route("/health", methods=["GET"])
+def health():
+    """Authenticated, read-only readiness check for agents and operators."""
+    key = request.headers.get("X-API-KEY", "")
+    if key != API_KEY:
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        with closing(sqlite3.connect(DB, timeout=5)) as con:
+            con.execute("SELECT 1").fetchone()
+    except sqlite3.Error:
+        app.logger.exception("Health check database probe failed")
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    return jsonify({
+        "ok": True,
+        "defense_enabled": defense_actions_enabled(),
+    }), 200
+
 @app.route("/get_defense_commands", methods=["GET"])
 def get_defense_commands():
     """
-    Agent polls this endpoint to get autonomous defense commands.
+    Return undelivered commands and retry deliveries whose acknowledgment lease expired.
     """
     key = request.headers.get("X-API-KEY", "")
     if key != API_KEY:
         return jsonify({"error": "unauthorized"}), 401
     
     host_id = request.args.get("host_id", "unknown")
-    
-    commands = pending_commands.pop(host_id, [])
+    now = time.time()
+    retry_before = now - COMMAND_DELIVERY_LEASE_SECONDS
+    with defense_commands_lock, closing(sqlite3.connect(DB, timeout=5)) as con:
+        cur = con.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        if not defense_actions_enabled():
+            cur.execute(
+                """UPDATE defense_commands SET status = 'cancelled'
+                   WHERE status IN ('pending', 'delivered')"""
+            )
+            con.commit()
+            commands = []
+        else:
+            cur.execute(
+                """SELECT command_id, command_json FROM defense_commands
+                   WHERE host_id = ?
+                     AND (status = 'pending'
+                          OR (status = 'delivered' AND last_delivered_at <= ?))
+                   ORDER BY created_at, command_id LIMIT ?""",
+                (host_id, retry_before, MAX_COMMANDS_PER_POLL),
+            )
+            rows = cur.fetchall()
+            commands = []
+            for command_id, command_json in rows:
+                command = json.loads(command_json)
+                commands.append(command)
+                cur.execute(
+                    """UPDATE defense_commands
+                       SET status = 'delivered', last_delivered_at = ?,
+                           delivery_attempts = delivery_attempts + 1
+                       WHERE command_id = ? AND status IN ('pending', 'delivered')""",
+                    (now, command_id),
+                )
+            con.commit()
     
     return jsonify({"commands": commands}), 200
 
@@ -224,17 +330,21 @@ def report_defense_action():
     if key != API_KEY:
         return jsonify({"error": "unauthorized"}), 401
     
-    result = request.get_json()
-    
-    print(f"\n📨 Agent Report from {result.get('host_id')}:")
-    print(f"   Command: {result.get('command')}")
-    print(f"   Status: {result.get('status')}")
-    print(f"   Details: {result.get('details')}")
-    
-    # In production, store this in database for audit trail
-    # and send alerts to security team
-    
-    return jsonify({"ok": True}), 200
+    result = request.get_json(silent=True)
+    try:
+        report_id = persist_agent_action_report(DB, result)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except sqlite3.Error:
+        app.logger.exception("Could not persist agent defense-action report")
+        return jsonify({"error": "could not store defense-action report"}), 500
+
+    app.logger.info(
+        "Agent defense-action report saved: id=%s host=%s action=%s status=%s command_id=%s",
+        report_id, result["host_id"], result["command"], result["status"],
+        result.get("command_id")
+    )
+    return jsonify({"ok": True, "report_id": report_id}), 200
 
 @app.route("/")
 def dashboard():
@@ -242,29 +352,47 @@ def dashboard():
     con = sqlite3.connect(DB)
     cur = con.cursor()
     
-    # Get hosts
-    cur.execute("SELECT host_id, MAX(ts), data FROM telemetry GROUP BY host_id")
+    # Select the telemetry payload from each host's latest heartbeat.
+    cur.execute("""
+        SELECT t.host_id, t.ts, t.data
+        FROM telemetry t
+        WHERE t.id = (
+            SELECT latest.id
+            FROM telemetry latest
+            WHERE latest.host_id = t.host_id
+            ORDER BY latest.ts DESC, latest.id DESC
+            LIMIT 1
+        )
+        ORDER BY t.ts DESC
+    """)
+    now = time.time()
     hosts = []
     for row in cur.fetchall():
         host_id, ts, data = row
         data = json.loads(data)
-        hosts.append(type('Host', (), {'host_id': host_id, 'ts': ts, 'data': data}))
+        hosts.append({
+            'host_id': host_id,
+            'ts': ts,
+            'data': data,
+            'online': now - ts <= 10,
+            'process_count': len(data.get('processes', [])),
+        })
     
     # Get AI threats
     cur.execute("""
-        SELECT host_id, ts, threat_type, severity, root_cause 
+        SELECT host_id, ts, threat_type, severity, description
         FROM threats 
         ORDER BY ts DESC LIMIT 30
     """)
     threats = []
     for row in cur.fetchall():
-        host_id, ts, threat_type, severity, root_cause = row
+        host_id, ts, threat_type, severity, description = row
         threats.append({
             'host_id': host_id,
             'ts': ts,
             'threat_type': threat_type,
             'severity': severity,
-            'root_cause': root_cause
+            'description': description
         })
     
     # Get AI analysis
@@ -300,15 +428,65 @@ def dashboard():
             'action': action_taken,
             'result': result
         })
-    
+
+    recent_activity = [{
+        'host_id': action['host_id'],
+        'ts': action['ts'],
+        'action': action['action'],
+        'source': 'Server authorization',
+        'status': 'authorized',
+        'details': action['result'],
+    } for action in actions]
+    cur.execute("""
+        SELECT host_id, reported_at, command, status, details
+        FROM agent_action_log
+        ORDER BY reported_at DESC LIMIT 20
+    """)
+    for host_id, reported_at, command, status, details in cur.fetchall():
+        recent_activity.append({
+            'host_id': host_id,
+            'ts': reported_at,
+            'action': command,
+            'source': 'Agent report',
+            'status': status,
+            'details': details,
+        })
+    recent_activity.sort(key=lambda item: item['ts'], reverse=True)
+    recent_activity = recent_activity[:12]
+
     con.close()
-    
-    now = time.time()
-    return render_template("dashboard_ai.html", 
-                          hosts=hosts, now=now, 
+    online_hosts = sum(host['online'] for host in hosts)
+    return render_template("dashboard_ai.html",
+                          hosts=hosts, now=now,
+                          online_hosts=online_hosts,
+                          defense_enabled=defense_actions_enabled(),
                           threats=threats, 
                           ai_analyses=ai_analyses,
-                          actions=actions)
+                          actions=actions,
+                          recent_activity=recent_activity)
+
+@app.route("/agent/<host_id>")
+def view_agent(host_id):
+    """Show the latest telemetry snapshot for a host."""
+    con = sqlite3.connect(DB)
+    cur = con.cursor()
+    cur.execute("""
+        SELECT ts, data FROM telemetry
+        WHERE host_id = ?
+        ORDER BY ts DESC LIMIT 1
+    """, (host_id,))
+    row = cur.fetchone()
+    con.close()
+    if row is None:
+        return "Host telemetry not found", 404
+    ts, data = row
+    return render_template(
+        "agent_detail.html",
+        host_id=host_id,
+        ts=ts,
+        now=time.time(),
+        data=json.loads(data),
+    )
 
 @app.route("/analysis/<host_id>")
 def view_analysis(host_id):
@@ -335,7 +513,12 @@ def view_analysis(host_id):
         })
     
     con.close()
-    return render_template("analysis_detail.html", host_id=host_id, analyses=analyses)
+    return render_template(
+        "analysis_detail.html",
+        host_id=host_id,
+        analyses=analyses,
+        now=time.time(),
+    )
 
 @app.route("/actions/<host_id>")
 def view_actions(host_id):
@@ -353,15 +536,41 @@ def view_actions(host_id):
     for row in cur.fetchall():
         ts, threat_type, decision_reason, action_taken, execution_result = row
         actions.append({
+            'source': 'server decision',
+            'status': 'authorized',
             'ts': ts,
             'threat_type': threat_type,
             'reason': decision_reason,
             'action': action_taken,
             'result': execution_result
         })
-    
+
+    cur.execute("""
+        SELECT reported_at, command, status, details
+        FROM agent_action_log
+        WHERE host_id = ?
+        ORDER BY reported_at DESC LIMIT 50
+    """, (host_id,))
+    for row in cur.fetchall():
+        ts, command, status, details = row
+        actions.append({
+            'source': 'agent report',
+            'status': status,
+            'ts': ts,
+            'threat_type': '',
+            'reason': '',
+            'action': command,
+            'result': f"{status}: {json.dumps(json.loads(details), ensure_ascii=False)}"
+        })
+
     con.close()
-    return render_template("actions_detail.html", host_id=host_id, actions=actions)
+    actions.sort(key=lambda action: action['ts'], reverse=True)
+    return render_template(
+        "actions_detail.html",
+        host_id=host_id,
+        actions=actions,
+        now=time.time(),
+    )
 
 def background_model_training():
     """Background thread for continuous model improvement."""
