@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Overview · Achilles Shield</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+{% macro relative_time(timestamp) -%}
+  {% set age = [0, (now - timestamp)|int]|max %}
+  {% if age < 60 %}{{ age }}s ago{% elif age < 3600 %}{{ (age / 60)|int }}m ago{% elif age < 86400 %}{{ (age / 3600)|int }}h ago{% else %}{{ (age / 86400)|int }}d ago{% endif %}
+{%- endmacro %}
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Achilles Shield overview">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <span><span class="brand-name">Achilles Shield</span><span class="brand-subtitle" style="display:block">Endpoint defense</span></span>
+      </a>
+      <nav class="nav" aria-label="Main navigation">
+        <a href="#hosts">Hosts</a>
+        <a href="#threats">Threats</a>
+        <a href="#activity">Activity</a>
+      </nav>
+    </header>
+
+    <section class="page-heading">
+      <div class="heading-row">
+        <div>
+          <div class="eyebrow">Operations overview</div>
+          <h1>Fleet overview</h1>
+          <p class="subtitle">A clear view of endpoint health, detections, and response activity.</p>
+        </div>
+        <span class="status {{ 'online' if defense_enabled else 'disabled' }}">
+          {{ "Response enabled" if defense_enabled else "Safe mode / disabled" }}
+        </span>
+      </div>
+    </section>
+
+    <section class="metrics-grid" aria-label="Fleet summary">
+      <article class="metric-card good">
+        <span class="metric-label">Reporting hosts</span>
+        <strong class="metric-value">{{ online_hosts }}<span class="muted"> / {{ hosts|length }}</span></strong>
+        <span class="metric-note">Seen in the last 10 seconds</span>
+      </article>
+      <article class="metric-card {% if threats %}alert{% endif %}">
+        <span class="metric-label">Recent detections</span>
+        <strong class="metric-value">{{ threats|length }}</strong>
+        <span class="metric-note">Latest {{ threats|length }} threat records</span>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Agent reports</span>
+        <strong class="metric-value">{{ recent_activity|selectattr('source', 'equalto', 'Agent report')|list|length }}</strong>
+        <span class="metric-note">In the latest activity feed</span>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">AI analyses</span>
+        <strong class="metric-value">{{ ai_analyses|length }}</strong>
+        <span class="metric-note">Most recent analysis records</span>
+      </article>
+    </section>
+
+    <section class="section" id="hosts">
+      <div class="section-heading">
+        <div><h2>Endpoint fleet</h2><p>Latest heartbeat and resource snapshot for each host</p></div>
+        <span class="muted">{{ hosts|length }} total</span>
+      </div>
+      <div class="panel table-wrap">
+        {% if hosts %}
+        <table>
+          <thead><tr><th>Host</th><th>State</th><th>Last seen</th><th>Operating system</th><th>CPU</th><th>Memory</th><th>Processes</th><th>Explore</th></tr></thead>
+          <tbody>
+          {% for host in hosts %}
+            <tr>
+              <td><a class="primary-cell" href="/agent/{{ host.host_id }}">{{ host.host_id }}</a><span class="secondary-cell">{{ host.data.get('hostname', '') }}</span></td>
+              <td><span class="status {{ 'online' if host.online else 'offline' }}">{{ 'Online' if host.online else 'Stale' }}</span></td>
+              <td class="number nowrap">
+                {{ relative_time(host.ts) }}
+              </td>
+              <td>{{ host.data.get('os', 'Unknown')|truncate(32) }}</td>
+              <td class="number">{{ host.data.get('cpu', 0)|round(1) }}%</td>
+              <td class="number">{{ host.data.get('ram', {}).get('percent', 0)|round(1) }}%</td>
+              <td class="number">{{ host.process_count }}</td>
+              <td><div class="inline-links"><a href="/analysis/{{ host.host_id }}">Analysis</a><a href="/actions/{{ host.host_id }}">Audit</a></div></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+          <div class="empty-state"><span class="empty-title">No endpoints reporting</span>Start an agent to see fleet health and activity here.</div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="section" id="threats">
+      <div class="section-heading"><div><h2>Recent detections</h2><p>Latest threat records across monitored endpoints</p></div><span class="muted">Latest {{ threats|length }}</span></div>
+      <div class="panel table-wrap">
+        {% if threats %}
+        <table>
+          <thead><tr><th>Host</th><th>Severity</th><th>Detection</th><th>Time</th><th>Context</th></tr></thead>
+          <tbody>{% for threat in threats %}
+            <tr>
+              <td><a class="primary-cell" href="/actions/{{ threat.host_id }}">{{ threat.host_id }}</a></td>
+              <td><span class="severity {{ threat.severity|lower }}">{{ threat.severity|default('Unknown') }}</span></td>
+              <td>{{ threat.threat_type|replace('_', ' ')|title }}</td>
+              <td class="number nowrap" title="Unix timestamp {{ threat.ts|float|round(3) }}">{{ relative_time(threat.ts) }}</td>
+              <td>{{ threat.description|default('No additional context')|truncate(100) }}</td>
+            </tr>
+          {% endfor %}</tbody>
+        </table>
+        {% else %}
+          <div class="empty-state"><span class="empty-title">No detections recorded</span>New threat records will appear here as telemetry is analyzed.</div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="section" id="activity">
+      <div class="section-heading"><div><h2>Response activity</h2><p>Authorizations are separate from endpoint-reported outcomes</p></div><span class="muted">Latest {{ recent_activity|length }}</span></div>
+      <div class="panel table-wrap">
+        {% if recent_activity %}
+        <table>
+          <thead><tr><th>Host</th><th>Source</th><th>Action</th><th>Outcome</th><th>Time</th><th>Details</th></tr></thead>
+          <tbody>{% for item in recent_activity %}
+            <tr>
+              <td><a class="primary-cell" href="/actions/{{ item.host_id }}">{{ item.host_id }}</a></td>
+              <td>{{ item.source }}</td>
+              <td>{{ item.action|replace('_', ' ')|title }}</td>
+              <td><span class="status {{ item.status|lower|replace('_', '-') }}">{{ item.status|replace('_', ' ') }}</span></td>
+              <td class="number nowrap" title="Unix timestamp {{ item.ts|float|round(3) }}">{{ relative_time(item.ts) }}</td>
+              <td>{{ item.details|truncate(110) }}</td>
+            </tr>
+          {% endfor %}</tbody>
+        </table>
+        {% else %}
+          <div class="empty-state"><span class="empty-title">No response activity</span>When the response policy authorizes an action or an agent reports an outcome, it will appear here.</div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-heading"><div><h2>Latest AI analysis</h2><p>Recommendations are informational and do not authorize response actions</p></div><span class="muted">Latest {{ ai_analyses|length }}</span></div>
+      {% if ai_analyses %}
+        {% for analysis in ai_analyses %}
+        <article class="analysis-card">
+          <div class="analysis-meta">
+            <a class="primary-cell" href="/analysis/{{ analysis.host_id }}">{{ analysis.host_id }}</a>
+            <span class="severity {{ analysis.threat_type|lower }}">{{ analysis.threat_type|replace('_', ' ')|title }}</span>
+            <span>{{ (analysis.confidence * 100)|round(1) }}% confidence</span>
+            <a href="/analysis/{{ analysis.host_id }}">View analysis →</a>
+          </div>
+          <p class="analysis-summary">{{ analysis.root_cause|default('No summary available')|truncate(240) }}</p>
+        </article>
+        {% endfor %}
+      {% else %}
+        <div class="panel empty-state"><span class="empty-title">No analyses recorded</span>Analysis summaries will appear when telemetry triggers an investigation.</div>
+      {% endif %}
+    </section>
+    <footer class="footer">Achilles Shield · Endpoint defense operations</footer>
+  </main>
+</body>
+</html>

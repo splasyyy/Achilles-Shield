@@ -1,9 +1,16 @@
 # agent/agent.py  (BEGIN)
-import os, time, socket, platform, json, threading
+import os, sys, time, socket, platform, json, threading
 import psutil, requests
-from autonomous_defense import AutonomousDefense
+from autonomous_defense import (
+    AutonomousDefense,
+    defense_actions_enabled,
+    defense_dry_run_enabled,
+    normalize_server_url,
+)
 
-SERVER_URL = os.environ.get("SERVER_URL", "http://127.0.0.1:5000")
+SERVER_URL = normalize_server_url(
+    os.environ.get("SERVER_URL", "http://127.0.0.1:5000")
+)
 INGEST_URL = SERVER_URL + "/ingest"
 API_KEY = os.environ.get("API_KEY", "supersecret")
 HOST_ID = os.environ.get("HOST_ID", socket.gethostname())
@@ -37,6 +44,7 @@ def collect():
             info['processes'].append({
                 "pid": p.info['pid'],
                 "name": p.info.get('name'),
+                "create_time_us": int(p.create_time() * 1_000_000),
                 "user": p.info.get('username'),
                 "cmdline": p.info.get('cmdline')[:10] if p.info.get('cmdline') else []
             })
@@ -86,21 +94,7 @@ def send(payload):
 
 def check_commands():
     """Check for autonomous defense commands from server."""
-    try:
-        headers = {"X-API-KEY": API_KEY}
-        r = requests.get(
-            f"{SERVER_URL}/get_defense_commands?host_id={HOST_ID}",
-            headers=headers,
-            timeout=5
-        )
-        if r.status_code == 200:
-            commands = r.json().get('commands', [])
-            for command in commands:
-                print(f"\n🎯 Executing autonomous defense command: {command.get('action')}")
-                result = defense.execute_command(command)
-                defense.report_action(result)
-    except Exception as e:
-        pass  # Silently ignore connection errors
+    defense.check_for_commands()
 
 def run_defense_loop():
     """Background thread: Check for defense commands."""
@@ -109,12 +103,36 @@ def run_defense_loop():
         time.sleep(5)  # Check every 5 seconds
 
 if __name__ == "__main__":
+    if "--check" in sys.argv[1:]:
+        readiness = defense.preflight()
+        print(f"Agent host: {readiness['host_id']}")
+        print(f"Local state database: {readiness['state_db']} ({readiness['local_state']})")
+        print(f"Server readiness: {readiness['server']}")
+        if readiness.get("server_defense_enabled") is not None:
+            print(
+                "Server defense: "
+                + ("enabled" if readiness["server_defense_enabled"] else "disabled/safe mode")
+            )
+        if readiness["dry_run"]:
+            print("Agent mitigation: dry-run")
+        elif readiness["defense_enabled"]:
+            print("Agent mitigation: enabled")
+        else:
+            print("Agent mitigation: disabled/safe mode")
+        sys.exit(0 if readiness["ready"] else 1)
+
     print(f"\n🛡️  Achilles Shield Agent Starting")
     print(f"   Host: {HOST_ID}")
     print(f"   Server: {SERVER_URL}")
     print(f"   Telemetry Interval: {INTERVAL}s")
     print(f"   Defense Check: 5s")
-    print(f"   Autonomous Defense: ENABLED")
+    if not defense_actions_enabled():
+        defense_mode = "DISABLED (safe mode)"
+    elif defense_dry_run_enabled():
+        defense_mode = "DRY RUN (no disruptive actions)"
+    else:
+        defense_mode = "ENABLED"
+    print(f"   Autonomous Defense: {defense_mode}")
     
     # Start defense command checker in background thread
     defense_thread = threading.Thread(target=run_defense_loop, daemon=True)

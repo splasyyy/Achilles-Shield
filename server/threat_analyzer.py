@@ -8,11 +8,211 @@ import os
 import json
 import requests
 import sqlite3
+import ipaddress
 from typing import Dict, List, Tuple
 import time
 
 OLLAMA_API = os.environ.get("OLLAMA_API", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama2:7b")
+SUSPICIOUS_PROCESS_MARKERS = ("hack", "malware", "keylog", "miner", "virus", "trojan")
+MAX_PROCESSES_PER_RESPONSE = 5
+MIN_EXTERNAL_IPS_FOR_ISOLATION = 6
+MIN_CPU_FOR_ISOLATION = 95
+MIN_PROCESSES_FOR_RESOURCE_SIGNAL = 200
+AGENT_ACTIONS = {"kill_process", "isolate_machine"}
+AGENT_ACTION_STATUSES = {
+    "executed", "partial", "failed", "rejected", "disabled", "unknown", "dry_run",
+}
+DEFAULT_PROTECTED_PROCESS_NAMES = {
+    "system", "registry", "smss.exe", "csrss.exe", "wininit.exe",
+    "services.exe", "lsass.exe", "svchost.exe", "winlogon.exe",
+    "systemd", "init", "kthreadd", "launchd", "kernel_task",
+    "securityd", "loginwindow",
+}
+PROTECTED_PROCESS_NAMES = DEFAULT_PROTECTED_PROCESS_NAMES | {
+    name.strip().casefold()
+    for name in os.environ.get("PROTECTED_PROCESS_NAMES", "").split(",")
+    if name.strip()
+}
+
+
+def defense_actions_enabled() -> bool:
+    """Fail closed when defense is disabled, safe mode is enabled, or config is invalid."""
+    truthy = {"1", "true", "yes", "on"}
+    enabled = os.environ.get("DEFENSE_ENABLED", "true").strip().lower()
+    safe_mode = os.environ.get("DEFENSE_SAFE_MODE", "false").strip().lower()
+    return enabled in truthy and safe_mode in {"0", "false", "no", "off"}
+
+
+def defense_isolation_enabled() -> bool:
+    return defense_actions_enabled() and os.environ.get(
+        "DEFENSE_ISOLATION_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def assess_isolation_evidence(telemetry: Dict) -> List[Dict]:
+    """Return independent deterministic signal summaries from one telemetry sample."""
+    if not isinstance(telemetry, dict):
+        return []
+
+    evidence = []
+    processes = telemetry.get("processes")
+    observed_pids = set()
+    if isinstance(processes, list):
+        suspicious = {}
+        for process in processes:
+            if not isinstance(process, dict):
+                continue
+            pid = process.get("pid")
+            name = process.get("name")
+            if (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                    and pid not in {1, 4}):
+                observed_pids.add(pid)
+            if (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                    and pid not in {1, 4}
+                    and isinstance(name, str) and name.strip()
+                    and name.casefold() not in PROTECTED_PROCESS_NAMES
+                    and any(marker in name.casefold() for marker in SUSPICIOUS_PROCESS_MARKERS)):
+                suspicious[pid] = name
+        if suspicious:
+            evidence.append({
+                "signal": "suspicious_process",
+                "count": len(suspicious),
+                "names": sorted(set(suspicious.values()), key=str.casefold)[:MAX_PROCESSES_PER_RESPONSE],
+                "processes": [
+                    {"pid": pid, "name": suspicious[pid]}
+                    for pid in sorted(suspicious)[:MAX_PROCESSES_PER_RESPONSE]
+                ],
+            })
+
+    strange_ips = telemetry.get("strange_ips")
+    external_ips = set()
+    if isinstance(strange_ips, list):
+        for value in strange_ips:
+            if not isinstance(value, str):
+                continue
+            try:
+                address = ipaddress.ip_address(value.strip())
+            except ValueError:
+                continue
+            if address.is_global:
+                external_ips.add(address.compressed)
+    if len(external_ips) >= MIN_EXTERNAL_IPS_FOR_ISOLATION:
+        evidence.append({
+            "signal": "external_connection_burst",
+            "count": len(external_ips),
+            "threshold": MIN_EXTERNAL_IPS_FOR_ISOLATION,
+        })
+
+    cpu = telemetry.get("cpu")
+    if (isinstance(cpu, (int, float)) and not isinstance(cpu, bool)
+            and MIN_CPU_FOR_ISOLATION <= cpu <= 100
+            and isinstance(processes, list)
+            and len(observed_pids) >= MIN_PROCESSES_FOR_RESOURCE_SIGNAL):
+        evidence.append({
+            "signal": "extreme_resource_load",
+            "cpu_percent": cpu,
+            "process_count": len(observed_pids),
+            "cpu_threshold": MIN_CPU_FOR_ISOLATION,
+            "process_threshold": MIN_PROCESSES_FOR_RESOURCE_SIGNAL,
+        })
+    return evidence
+
+
+def persist_agent_action_report(db_path: str, report: Dict) -> int:
+    """Validate and persist the agent's outcome; return its audit-row ID."""
+    if not isinstance(report, dict):
+        raise ValueError("report must be a JSON object")
+
+    host_id = report.get("host_id")
+    command = report.get("command")
+    status = report.get("status")
+    if not isinstance(host_id, str) or not host_id.strip() or len(host_id) > 256:
+        raise ValueError("host_id must be a non-empty string of at most 256 characters")
+    if not isinstance(command, str) or command not in AGENT_ACTIONS:
+        raise ValueError("command is not an authorized defense action")
+    if not isinstance(status, str) or status not in AGENT_ACTION_STATUSES:
+        raise ValueError("status is not a recognized agent outcome")
+    command_id = report.get("command_id")
+    if command_id is not None and (
+        not isinstance(command_id, str) or not command_id.strip() or len(command_id) > 64
+    ):
+        raise ValueError("command_id must be a non-empty string of at most 64 characters")
+
+    try:
+        details_json = json.dumps(report.get("details", {}), allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ValueError("details must be valid JSON data") from error
+    if len(details_json.encode("utf-8")) > 65536:
+        raise ValueError("details exceed the 64 KiB audit limit")
+
+    con = sqlite3.connect(db_path, timeout=5)
+    try:
+        cur = con.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS agent_action_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host_id TEXT NOT NULL,
+            reported_at REAL NOT NULL,
+            command TEXT NOT NULL,
+            status TEXT NOT NULL,
+            details TEXT NOT NULL,
+            command_id TEXT
+        )""")
+        cur.execute("PRAGMA table_info(agent_action_log)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "command_id" not in columns:
+            cur.execute("ALTER TABLE agent_action_log ADD COLUMN command_id TEXT")
+        cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_action_command_id
+                        ON agent_action_log(command_id) WHERE command_id IS NOT NULL""")
+
+        if command_id is not None:
+            cur.execute(
+                """SELECT host_id, action, status, delivery_attempts FROM defense_commands
+                   WHERE command_id = ?""",
+                (command_id,),
+            )
+            queued_command = cur.fetchone()
+            if (queued_command is None or queued_command[0] != host_id
+                    or queued_command[1] != command):
+                raise ValueError("command_id does not match a command for this host and action")
+            if queued_command[3] == 0:
+                raise ValueError("command has not been delivered and cannot be acknowledged")
+
+            cur.execute(
+                "SELECT id FROM agent_action_log WHERE command_id = ?",
+                (command_id,),
+            )
+            existing_report = cur.fetchone()
+            if existing_report is not None:
+                con.commit()
+                return existing_report[0]
+
+        cur.execute(
+            """INSERT INTO agent_action_log
+                (host_id, reported_at, command, status, details, command_id)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+            (host_id, time.time(), command, status, details_json, command_id),
+        )
+        report_id = cur.lastrowid
+        if command_id is not None:
+            cur.execute(
+                """UPDATE defense_commands
+                   SET status = 'reported', reported_at = ?
+                   WHERE command_id = ? AND host_id = ? AND action = ?
+                     AND status IN ('pending', 'delivered', 'cancelled')
+                     AND delivery_attempts > 0""",
+                (time.time(), command_id, host_id, command),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("command is no longer awaiting an agent report")
+        con.commit()
+        return report_id
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
 
 class CompromiseTracker:
     """Tracks compromised machines and escalates responses for persistent threats."""
@@ -350,239 +550,171 @@ Respond in JSON format only."""
 
 class AutonomousResponseEngine:
     """
-    Autonomous system that decides how to respond to threats
-    and executes appropriate actions.
-    Includes escalation logic for persistent threats and recurrent attacks.
+    Authorizes deterministic process mitigation and evidence-backed isolation;
+    LLM output is informational only.
     """
     
     def __init__(self, db_path):
         self.db_path = db_path
-        self.compromise_tracker = CompromiseTracker(db_path)
     
-    def decide_response(self, analysis: Dict, host_id: str) -> Dict:
+    def decide_response(self, analysis: Dict, host_id: str, telemetry: Dict = None) -> Dict:
         """
-        Decide autonomous response based on threat analysis.
-        Includes escalation for persistent/recurrent threats.
-        Returns: {
-            'action': 'block_ip' | 'kill_process' | 'isolate_machine' | 'alert_only',
-            'targets': ['process_name'] or ['ip_address'],
-            'execute': True/False (based on severity threshold),
-            'reason': 'Why taking this action',
-            'escalated': True/False
-        }
+        Process termination requires an exact observed suspicious process identity.
+        Isolation requires two independent deterministic telemetry signals and an
+        explicit operator opt-in. Analysis recommendations never authorize actions.
         """
-        
-        threat_type = analysis['threat_type']
-        severity = analysis['severity']
-        confidence = analysis['confidence']
-        recommendation = analysis['recommendation']
-        
-        print(f"\n🎯 Autonomous Response Engine deciding action...")
-        print(f"   Threat: {threat_type} | Severity: {severity} | Confidence: {confidence}")
-        
-        # CHECK COMPROMISE HISTORY - ESCALATE IF PERSISTENT
-        is_compromised, escalation_reason = self.compromise_tracker.check_compromise_history(
-            host_id, threat_type
-        )
-        
-        if is_compromised:
-            print(f"⚠️  HOST PREVIOUSLY COMPROMISED: {escalation_reason}")
-            # Escalate to isolation for persistent threats
-            decision = {
-                'action': 'isolate_machine',
-                'targets': [host_id],
-                'execute': True,
-                'reason': f'🚨 ESCALATION: {escalation_reason}. Isolating host immediately.',
-                'escalated': True
-            }
-            self.compromise_tracker.mark_isolated(host_id, escalation_reason)
-            return decision
-        
-        # Decision logic
         decision = {
             'action': 'alert_only',
             'targets': [],
             'execute': False,
-            'reason': 'Insufficient confidence',
-            'escalated': False
+            'reason': 'No observed process matched an automatic mitigation rule.'
         }
-        
-        # HIGH SEVERITY + HIGH CONFIDENCE = AUTO-EXECUTE
-        if severity == 'critical' and confidence > 0.7:
-            if threat_type == 'ddos_agent':
-                decision = {
-                    'action': 'isolate_machine',
-                    'targets': [host_id],
-                    'execute': True,
-                    'reason': f'CRITICAL: DDOS agent detected (confidence: {confidence}). Isolating immediately.',
-                    'escalated': False
-                }
-            elif threat_type == 'ransomware':
-                decision = {
-                    'action': 'isolate_machine',
-                    'targets': [host_id],
-                    'execute': True,
-                    'reason': f'CRITICAL: Ransomware detected (confidence: {confidence}). Isolating to prevent spread.',
-                    'escalated': False
-                }
-        
-        # HIGH SEVERITY + MEDIUM CONFIDENCE = KILL PROCESS + ALERT
-        elif severity in ['high', 'critical'] and confidence > 0.6:
-            if threat_type == 'cryptominer':
-                suspicious_procs = analysis.get('suspicious_processes', [])
-                decision = {
-                    'action': 'kill_process',
-                    'targets': suspicious_procs if suspicious_procs else ['unknown_process'],
-                    'execute': True,
-                    'reason': f'HIGH: Cryptominer detected. Killing suspicious processes: {suspicious_procs}',
-                    'escalated': False
-                }
-            elif threat_type == 'ddos_agent':
-                decision = {
-                    'action': 'isolate_machine',
-                    'targets': [host_id],
-                    'execute': True,
-                    'reason': f'HIGH: DDoS agent detected. Isolating machine.',
-                    'escalated': False
-                }
-            elif recommendation == 'block_ip':
-                suspicious_ips = analysis.get('suspicious_connections', [])
-                decision = {
-                    'action': 'block_ip',
-                    'targets': suspicious_ips,
-                    'execute': True,
-                    'reason': f'HIGH: Blocking suspicious IPs: {suspicious_ips}',
-                    'escalated': False
-                }
-        
-        # MEDIUM SEVERITY + HIGH CONFIDENCE = BLOCK IPS + ALERT
-        elif severity == 'medium' and confidence > 0.75:
-            if recommendation == 'block_ip':
-                suspicious_ips = analysis.get('suspicious_connections', [])
-                decision = {
-                    'action': 'block_ip',
-                    'targets': suspicious_ips,
-                    'execute': True,
-                    'reason': f'MEDIUM: Blocking suspected malicious IPs (high confidence).',
-                    'escalated': False
-                }
-            else:
-                decision = {
-                    'action': 'alert_only',
-                    'targets': [],
-                    'execute': False,
-                    'reason': f'MEDIUM severity - alerting for human review.',
-                    'escalated': False
-                }
-        
-        # LOW SEVERITY OR LOW CONFIDENCE = ALERT ONLY
-        else:
-            decision = {
-                'action': 'alert_only',
-                'targets': [],
-                'execute': False,
-                'reason': f'Insufficient threat level (severity: {severity}, confidence: {confidence}). Alerting only.',
-                'escalated': False
-            }
-        
-        # Log threat to compromise tracker
-        if decision['execute']:
-            self.compromise_tracker.log_compromise(
-                host_id, threat_type, confidence, analysis.get('root_cause', '')
+        if not defense_actions_enabled():
+            decision['reason'] = 'Defense actions are disabled or safe mode is active.'
+            return decision
+
+        processes = telemetry.get('processes', []) if isinstance(telemetry, dict) else []
+        if not isinstance(processes, list):
+            return decision
+        evidence = assess_isolation_evidence(telemetry)
+        if (defense_isolation_enabled() and len(evidence) >= 2
+                and any(item['signal'] == 'external_connection_burst' for item in evidence)):
+            summary = "; ".join(
+                f"{item['signal']}={json.dumps(item, sort_keys=True)}"
+                for item in evidence
             )
-        
+            return {
+                'action': 'isolate_machine',
+                'targets': [host_id],
+                'execute': True,
+                'reason': f'Isolation authorized by {len(evidence)} independent telemetry signals: {summary}',
+                'evidence': evidence,
+            }
+
+        targets = []
+        seen_pids = set()
+        for process in processes:
+            if not isinstance(process, dict):
+                continue
+            pid = process.get('pid')
+            name = process.get('name')
+            created_at = process.get('create_time_us')
+            if (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                    and pid not in {1, 4}
+                    and isinstance(name, str) and name.strip()
+                    and name.casefold() not in PROTECTED_PROCESS_NAMES
+                    and isinstance(created_at, int) and not isinstance(created_at, bool)
+                    and created_at > 0
+                    and any(marker in name.casefold() for marker in SUSPICIOUS_PROCESS_MARKERS)
+                    and pid not in seen_pids):
+                targets.append({
+                    'pid': pid,
+                    'name': name,
+                    'create_time_us': created_at
+                })
+                seen_pids.add(pid)
+                if len(targets) == MAX_PROCESSES_PER_RESPONSE:
+                    break
+
+        if targets:
+            decision = {
+                'action': 'kill_process',
+                'targets': targets,
+                'execute': True,
+                'reason': 'Observed process name matched a configured threat marker.'
+            }
         return decision
+
+    @staticmethod
+    def _valid_process_targets(targets: List[Dict]) -> bool:
+        return (
+            isinstance(targets, list)
+            and 0 < len(targets) <= MAX_PROCESSES_PER_RESPONSE
+            and all(
+                isinstance(target, dict)
+                and set(target) == {'pid', 'name', 'create_time_us'}
+                and isinstance(target.get('pid'), int)
+                and not isinstance(target.get('pid'), bool)
+                and target['pid'] > 0
+                and target['pid'] not in {1, 4}
+                and isinstance(target.get('name'), str)
+                and target['name'].strip()
+                and target['name'].casefold() not in PROTECTED_PROCESS_NAMES
+                and isinstance(target.get('create_time_us'), int)
+                and not isinstance(target.get('create_time_us'), bool)
+                and target['create_time_us'] > 0
+                and any(marker in target['name'].casefold()
+                        for marker in SUSPICIOUS_PROCESS_MARKERS)
+                for target in targets
+            )
+            and len({target['pid'] for target in targets}) == len(targets)
+        )
     
-    def execute_response(self, decision: Dict, host_id: str) -> Dict:
+    def execute_response(self, decision: Dict, host_id: str, telemetry: Dict = None) -> Dict:
         """
-        Execute the decided response action.
-        In real implementation, would send commands to agents.
+        Revalidate authorization before producing an agent command.
         """
-        
-        action = decision['action']
-        execute = decision['execute']
-        reason = decision['reason']
-        targets = decision['targets']
-        
         result = {
-            'action': action,
+            'action': decision.get('action', 'alert_only'),
+            'authorized': False,
             'executed': False,
             'result': 'Not executed',
             'timestamp': time.time()
         }
-        
-        if not execute:
-            result['result'] = 'Skipped (confidence too low). Human review recommended.'
-            print(f"⚠️  {result['result']}")
+        if not decision.get('execute'):
+            result['result'] = 'Skipped (response policy did not authorize an action).'
             return result
-        
-        print(f"\n🚨 EXECUTING AUTONOMOUS DEFENSE ACTION: {action.upper()}")
-        print(f"   Reason: {reason}")
-        
-        if action == 'kill_process':
-            result = self._execute_kill_process(host_id, targets, reason)
-        elif action == 'block_ip':
-            result = self._execute_block_ip(host_id, targets, reason)
-        elif action == 'isolate_machine':
-            result = self._execute_isolate_machine(host_id, reason)
-        
+
+        action = decision.get('action')
+        targets = decision.get('targets')
+        reason = decision.get('reason', '')
+        if not defense_actions_enabled():
+            result['result'] = 'Skipped (defense actions are disabled or safe mode is active).'
+        elif action != 'kill_process':
+            if action == 'isolate_machine':
+                evidence = assess_isolation_evidence(telemetry)
+                expected_evidence = decision.get('evidence')
+                if (not defense_isolation_enabled() or len(evidence) < 2
+                        or not any(item['signal'] == 'external_connection_burst'
+                                   for item in evidence)
+                        or evidence != expected_evidence
+                        or decision.get('targets') != [host_id]):
+                    result['result'] = 'Rejected (isolation evidence or opt-in validation failed).'
+                else:
+                    result = self._authorize_isolate_machine(host_id, evidence, reason)
+            else:
+                result['result'] = 'Rejected (action is not authorized by the automatic response policy).'
+        elif not self._valid_process_targets(targets):
+            result['result'] = 'Rejected (process targets failed identity validation).'
+        else:
+            result = self._authorize_kill_process(host_id, targets, reason)
         return result
     
-    def _execute_kill_process(self, host_id: str, processes: List[str], reason: str) -> Dict:
-        """Execute process termination on remote host."""
+    def _authorize_kill_process(self, host_id: str, processes: List[Dict], reason: str) -> Dict:
+        """Authorize an exact process command for agent-side execution."""
         print(f"   📋 Command: KILL_PROCESS")
         print(f"   🖥️  Host: {host_id}")
         print(f"   ⚙️  Processes: {processes}")
-        print(f"   ✅ EXECUTED (command sent to agent)")
-        
-        # In real implementation:
-        # - Send kill_process command to agent
-        # - Agent terminates processes
-        # - Agent reports back
+        print(f"   ✅ Authorized for agent delivery")
         
         return {
             'action': 'kill_process',
-            'executed': True,
-            'result': f'Killed processes: {processes} on {host_id}',
+            'authorized': True,
+            'executed': False,
+            'result': f'Process termination command authorized for {host_id}; awaiting agent execution.',
             'timestamp': time.time()
         }
-    
-    def _execute_block_ip(self, host_id: str, ips: List[str], reason: str) -> Dict:
-        """Execute IP blocking on remote host."""
-        print(f"   📋 Command: BLOCK_IP")
-        print(f"   🖥️  Host: {host_id}")
-        print(f"   🚫 Blocked IPs: {ips}")
-        print(f"   ✅ EXECUTED (firewall rule added)")
-        
-        # In real implementation:
-        # - Add firewall rules to agent
-        # - Agent blocks outbound connections to these IPs
-        # - Agent monitors for bypass attempts
-        
-        return {
-            'action': 'block_ip',
-            'executed': True,
-            'result': f'Blocked IPs: {ips} on {host_id}',
-            'timestamp': time.time()
-        }
-    
-    def _execute_isolate_machine(self, host_id: str, reason: str) -> Dict:
-        """Execute machine isolation (network disconnect)."""
+
+    def _authorize_isolate_machine(self, host_id: str, evidence: List[Dict], reason: str) -> Dict:
+        """Authorize network isolation after telemetry evidence validation."""
         print(f"   📋 Command: ISOLATE_MACHINE")
         print(f"   🖥️  Host: {host_id}")
-        print(f"   🔌 ACTION: Disconnecting from network")
-        print(f"   ✅ EXECUTED (machine isolated)")
-        
-        # In real implementation:
-        # - Send network_disconnect command
-        # - Agent disables network interfaces
-        # - System becomes air-gapped from network
-        # - Threat cannot spread
-        
+        print(f"   🔎 Evidence: {evidence}")
         return {
             'action': 'isolate_machine',
-            'executed': True,
-            'result': f'Isolated {host_id} from network',
+            'authorized': True,
+            'executed': False,
+            'result': f'Isolation command authorized for {host_id}; awaiting agent execution.',
             'timestamp': time.time()
         }
 
@@ -590,6 +722,7 @@ class AutonomousResponseEngine:
 def log_response_action(db_path: str, host_id: str, analysis: Dict, 
                        decision: Dict, execution_result: Dict) -> None:
     """Log all threat analysis and response actions for audit trail."""
+    con = None
     try:
         con = sqlite3.connect(db_path)
         cur = con.cursor()
@@ -598,23 +731,42 @@ def log_response_action(db_path: str, host_id: str, analysis: Dict,
         cur.execute("""CREATE TABLE IF NOT EXISTS response_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             host_id TEXT,
-            timestamp REAL,
+            ts REAL,
             threat_type TEXT,
             confidence REAL,
             root_cause TEXT,
-            decision TEXT,
-            action_executed TEXT,
-            result TEXT
+            decision_reason TEXT,
+            action_taken TEXT,
+            execution_result TEXT
         )""")
-        
-        cur.execute("""INSERT INTO response_log 
-            (host_id, timestamp, threat_type, confidence, root_cause, decision, action_executed, result)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        cur.execute("PRAGMA table_info(response_log)")
+        columns = {row[1] for row in cur.fetchall()}
+        if {'ts', 'decision_reason', 'action_taken', 'execution_result'} <= columns:
+            timestamp_column = 'ts'
+            decision_column = 'decision_reason'
+            action_column = 'action_taken'
+            result_column = 'execution_result'
+        elif {'timestamp', 'decision', 'action_executed', 'result'} <= columns:
+            timestamp_column = 'timestamp'
+            decision_column = 'decision'
+            action_column = 'action_executed'
+            result_column = 'result'
+        else:
+            raise sqlite3.DatabaseError("response_log has an unsupported schema")
+
+        cur.execute(
+            f"""INSERT INTO response_log
+                (host_id, {timestamp_column}, threat_type, confidence, root_cause,
+                 {decision_column}, {action_column}, {result_column})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (host_id, time.time(), analysis['threat_type'], analysis['confidence'],
              analysis['root_cause'], decision['reason'], decision['action'],
-             execution_result['result']))
+             execution_result['result'])
+        )
         
         con.commit()
-        con.close()
     except Exception as e:
         print(f"Error logging response: {e}")
+    finally:
+        if con is not None:
+            con.close()

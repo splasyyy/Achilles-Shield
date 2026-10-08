@@ -1,139 +1,77 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Agent {{ host_id }} Details</title>
-  <meta http-equiv="refresh" content="3">
-  <style>
-    body {
-      font-family: 'Segoe UI', Arial, sans-serif;
-      margin: 24px;
-      background: #18191b;
-      color: #e7e7ea;
-    }
-    h1 {
-      color: #f5c242;
-      letter-spacing: 1px;
-      font-weight: 700;
-      text-shadow: 0 2px 8px #000a;
-    }
-    .back-link {
-      color: #40e0d0;
-      text-decoration: none;
-      margin-bottom: 16px;
-      display: inline-block;
-      font-weight: 600;
-      font-size: 1.1em;
-      transition: color 0.2s;
-    }
-    .back-link:hover {
-      color: #f5c242;
-      text-decoration: underline;
-    }
-    .section {
-      background: #232325;
-      padding: 18px;
-      margin-bottom: 18px;
-      border-radius: 14px;
-      box-shadow: 0 2px 16px #0004;
-    }
-    .metric-label {
-      font-weight: 600;
-      color: #f5c242;
-      margin-right: 6px;
-    }
-    ul {
-      max-height: 320px;
-      overflow-y: auto;
-      background: #18191b;
-      padding: 12px;
-      border-radius: 8px;
-      margin: 0;
-      font-size: 1em;
-      border: 1px solid #232323;
-    }
-    h2 {
-      color: #40e0d0;
-      font-size: 1.2em;
-      margin-top: 0;
-      margin-bottom: 10px;
-      font-weight: 700;
-    }
-    .badge {
-      display: inline-block;
-      padding: 2px 12px;
-      border-radius: 12px;
-      font-size: 0.97em;
-      font-weight: 600;
-      letter-spacing: 0.2px;
-      margin-right: 2px;
-      box-shadow: 0 1px 4px #0002;
-    }
-    .badge.cpu {
-      background: #23232a;
-      color: #ffb347;
-      border: 1px solid #ffb34744;
-    }
-    .badge.ram {
-      background: #23232a;
-      color: #40e0d0;
-      border: 1px solid #40e0d044;
-    }
-    .badge.disk {
-      background: #23232a;
-      color: #f5c242;
-      border: 1px solid #f5c24244;
-    }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="15">
+  <title>{{ host_id }} · Endpoint · Achilles Shield</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body>
-  <a href="/" class="back-link">&larr; Back to Dashboard</a>
-  <h1>Agent: {{ host_id }}</h1>
-  <div class="section">
-    <div><span class="metric-label">Last Seen:</span> {{ ts|float|round(1) }}</div>
-    <div><span class="metric-label">OS:</span> {{ data.get('os', '') }}</div>
-    <div><span class="metric-label">Hostname:</span> {{ data.get('hostname', '') }}</div>
-    <div>
-      <span class="metric-label">CPU:</span>
-      <span class="badge cpu">{{ data.get('cpu', '') }}%</span>
-      <span class="metric-label">RAM:</span>
-      <span class="badge ram">{{ data.get('ram', {}).get('percent', '') }}%</span>
-      <span class="metric-label">Disk:</span>
-      <span class="badge disk">{{ data.get('disk', {}).get('percent', '') }}%</span>
-    </div>
-    <div><span class="metric-label">Open Ports:</span> {{ data.get('open_ports', [])|join(', ') }}</div>
-    <div><span class="metric-label">Strange IPs:</span> {{ data.get('strange_ips', [])|join(', ') }}</div>
-  </div>
-  <div class="section">
-    <h2>Processes ({{ data.get('processes', [])|length }})</h2>
-    <ul id="process-list" style="max-height:400px;overflow-y:auto;">
-      {% for p in data.get('processes', []) %}
-        <li>{{ p['name'] }} (pid {{ p['pid'] }}) - {{ p['user'] }}</li>
-      {% endfor %}
-    </ul>
-  </div>
-  <div class="section">
-    <h2>Active Connections ({{ data.get('active_conns', [])|length }})</h2>
-    <ul>
-      {% for c in data.get('active_conns', []) %}
-        <li>{{ c['laddr'] }} → {{ c['raddr'] }} (pid {{ c['pid'] }})</li>
-      {% endfor %}
-    </ul>
-  </div>
-  <script>
-  // Save scroll position before refresh
-  window.addEventListener('beforeunload', function() {
-    var pl = document.getElementById('process-list');
-    if (pl) localStorage.setItem('processScroll', pl.scrollTop);
-  });
-  // Restore scroll position after refresh
-  window.addEventListener('DOMContentLoaded', function() {
-    var pl = document.getElementById('process-list');
-    if (pl) {
-      var scroll = localStorage.getItem('processScroll');
-      if (scroll) pl.scrollTop = scroll;
-    }
-  });
-  </script>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">A</span><span><span class="brand-name">Achilles Shield</span><span class="brand-subtitle" style="display:block">Endpoint defense</span></span></a>
+      <nav class="nav" aria-label="Host navigation"><a href="/">Overview</a><a href="/analysis/{{ host_id }}">Analysis</a><a href="/actions/{{ host_id }}">Action audit</a></nav>
+    </header>
+    <section class="page-heading">
+      <div class="eyebrow">Endpoint detail</div>
+      <div class="heading-row">
+        <div><h1>{{ host_id }}</h1><p class="subtitle">{{ data.get('hostname', 'Unknown hostname') }} · {{ data.get('os', 'Unknown operating system') }}</p></div>
+        {% set age = [0, (now - ts)|int]|max %}
+        <span class="status {{ 'online' if age <= 10 else 'offline' }}">{{ 'Reporting' if age <= 10 else 'Stale' }}</span>
+      </div>
+    </section>
+    <section class="details-grid" aria-label="Latest endpoint metrics">
+      <article class="detail-card"><span class="metric-label">CPU utilization</span><strong class="metric-value">{{ data.get('cpu', 0)|round(1) }}%</strong></article>
+      <article class="detail-card"><span class="metric-label">Memory utilization</span><strong class="metric-value">{{ data.get('ram', {}).get('percent', 0)|round(1) }}%</strong></article>
+      <article class="detail-card"><span class="metric-label">Disk utilization</span><strong class="metric-value">{{ data.get('disk', {}).get('percent', 0)|round(1) }}%</strong></article>
+    </section>
+    <p class="muted">Last heartbeat
+      {% if age < 60 %}{{ age }} seconds ago{% elif age < 3600 %}{{ (age / 60)|int }} minutes ago{% else %}{{ (age / 3600)|int }} hours ago{% endif %}
+      · Snapshot refreshes every 15 seconds
+    </p>
+
+    <section class="section">
+      <div class="section-heading"><div><h2>Process inventory</h2><p>Observed processes in the latest telemetry snapshot</p></div><span class="tag">{{ data.get('processes', [])|length }} processes</span></div>
+      <div class="panel process-list">
+        {% if data.get('processes', []) %}
+          {% for process in data.get('processes', []) %}
+          <div class="process-row">
+            <span class="primary-cell">{{ process.get('name') or 'Unknown process' }}</span>
+            <span class="mono">PID {{ process.get('pid', '—') }}</span>
+            <span class="process-user muted">{{ process.get('user') or 'User unavailable' }}</span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="empty-state">No process inventory in the latest snapshot.</div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-heading"><div><h2>Network context</h2><p>Open ports and active external connections observed by the agent</p></div></div>
+      <div class="details-grid">
+        <article class="detail-card">
+          <h3>Listening ports</h3>
+          <p class="muted">{{ data.get('open_ports', [])|length }} observed</p>
+          <p class="mono">{{ data.get('open_ports', [])|join(', ') or 'No listening ports reported' }}</p>
+        </article>
+        <article class="detail-card">
+          <h3>Unusual external addresses</h3>
+          <p class="muted">{{ data.get('strange_ips', [])|length }} observed</p>
+          <p class="mono">{{ data.get('strange_ips', [])|join(', ') or 'None reported' }}</p>
+        </article>
+        <article class="detail-card">
+          <h3>Active connections</h3>
+          <p class="muted">{{ data.get('active_conns', [])|length }} in snapshot</p>
+          {% for connection in data.get('active_conns', [])[:5] %}
+            <p class="mono">{{ connection.get('laddr', '?') }} → {{ connection.get('raddr', '?') }}</p>
+          {% else %}
+            <p class="muted">No active connections reported.</p>
+          {% endfor %}
+        </article>
+      </div>
+    </section>
+  </main>
 </body>
 </html>
