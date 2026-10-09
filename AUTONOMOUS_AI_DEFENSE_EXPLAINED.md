@@ -1,132 +1,70 @@
-# Achilles Shield: How Detection, Prediction, and Response Work
+# How Achilles Shield Works
 
-Achilles Shield is a local-first endpoint-defense prototype. Agents report
-telemetry to a server, which records detections and applies deterministic
-policy to decide whether any supported response can be authorized. Optional AI
-analysis and intrusion-path predictions provide context; neither grants
-permission to perform a destructive action.
+Achilles Shield monitors computers for suspicious activity. An agent is a
+small program running on each monitored computer. It sends selected computer
+status and activity to a server, which records alerts and uses fixed safety
+rules before allowing supported responses.
 
-This guide describes the implementation as it exists today. It is not a claim
-that the system detects every attack, identifies an attacker, or is ready for
-production deployment.
+Optional AI analysis and guesses about what an intruder might do next are
+information for review; they cannot authorize actions. This is an evolving
+prototype, not a guarantee that every attack will be detected or stopped.
 
-## The main components
+## Components
 
-### Endpoint agent
+- **Agent:** Sends selected computer information to the server, checks
+  certain Windows sign-in and system-change records, checks commands before
+  acting, and reports the result.
+- **Server:** Looks for alert patterns and follows fixed response rules.
+  Optional Ollama AI can explain suspicious activity, but cannot approve
+  actions.
+- **Alerts and predictions:** Sign-in alerts and suggestions about what might
+  happen next are for people to review. An optional prediction feature can
+  learn patterns from labeled past events, but it cannot act on those
+  predictions.
+- **Responses:** The system may stop a suspicious program only after
+  checking the exact program and excluding protected Windows processes.
+  Disconnecting a computer from the network is a separate option and is off
+  by default. Set `DEFENSE_ENABLED=false` or `DEFENSE_SAFE_MODE=true` to pause
+  responses; set `DEFENSE_DRY_RUN=true` for an agent to test without acting.
 
-The agent periodically reports host telemetry and can receive authorized
-commands. On Windows, it also polls selected Security and System event logs for
-authentication and persistence events. It validates a command's host and
-target before execution, rechecks process identity immediately before
-termination, and reports the outcome to the server. An authorization is not
-proof that the endpoint completed the action.
+An older feature can flag unusual computer statistics, but it does not predict
+attacks and is not used by the current server. The optional event-prediction
+feature is a separate tool from Ollama. It looks for patterns in supplied
+examples; it does not know how likely an attack is. No examples or trained
+model are included.
 
-### Server and response policy
+## Example flow
 
-The server correlates telemetry and applies deterministic rules. An optional
-local Ollama model can produce general-purpose analysis of suspicious
-telemetry, but its recommendation, confidence, and generated text do not
-authorize a response.
+1. Windows records a sign-in or system-change event.
+2. The agent checks selected records and sends relevant details to the server.
+3. If the events match a known pattern, the server records an alert. It may
+   also show a suggestion about what could happen next.
+4. A person reviews the alert. These intrusion alerts do not automatically
+   cause the agent to act.
+5. Separately, computer activity may match the rules for stopping a
+   suspicious program. Disconnecting a computer requires a separate setting
+   and stronger evidence.
+6. Before acting, the agent checks the command and the target again. It
+   reports whether it acted, refused, or only tested the command. Permission
+   to act does not prove the action succeeded.
 
-Routine process termination is limited to a suspicious process observed in
-telemetry and bound to its exact process identity. Protected operating-system
-processes and critical process IDs are excluded. Machine isolation is a
-separate opt-in and requires stronger, independent evidence; it can interrupt
-remote access. Response can be paused with `DEFENSE_ENABLED=false` or
-`DEFENSE_SAFE_MODE=true`. Agent-side `DEFENSE_DRY_RUN=true` validates and
-reports an action without carrying it out.
+What the agent can see depends on Windows settings and permissions. Alerts
+also depend on the computer being able to reach the server; there is no
+guaranteed response time.
 
-### Detection and prediction
+## Sequence-model data
 
-Selected Windows events can produce alert-only records, including failed
-logon bursts, cross-host password sprays, a failure followed by success, and
-selected account, privilege, task, and service events. Correlation uses
-reported event data; IP addresses, workstation names, and alerts do not prove
-who initiated activity or where it originated.
+The optional prediction feature needs a text data file with one record per
+line. Each record needs an incident ID (`campaign_id`), a label (`attack` or
+`benign`), and an ordered list of event names (`events`). Test incidents must
+be separate from training incidents, and each incident must have only one
+label. Both sets need attack and normal-use examples. Training needs at least
+three separate attack incidents, and a pattern must appear in three incidents
+before it can be suggested.
 
-For some intrusion alerts, deterministic heuristics display a plausible next
-step and the evidence behind that hypothesis. A separate optional sequence
-model can rank supported next Windows event types using frequencies learned
-from labeled event sequences. It abstains when evidence is insufficient.
-These predictions are advisory: they do not block network traffic, disable
-accounts, terminate sessions, or queue response commands.
-
-The repository's legacy Isolation Forest is a separate anomaly detector for
-numeric host telemetry; it is not used by the current autonomous server flow
-to predict intrusion sequences. The sequence model is also separate from the
-Ollama LLM. None of these components should be described as a validated,
-calibrated predictor of attacker intent.
-
-## An illustrative event timeline
-
-This timeline shows the boundaries between stages; it does not promise
-detection or response for every incident.
-
-1. **An event occurs.** For example, Windows records repeated failed logons.
-2. **The agent polls the event log.** It forwards selected fields, not full
-   event contents such as account names or task details.
-3. **The server correlates evidence.** If a configured alert pattern matches,
-   it records an intrusion alert. It may also display a rule-based path
-   hypothesis and, if configured, advisory sequence-model candidates.
-4. **An operator reviews the evidence.** A prediction is a hypothesis, not an
-   observed next step or an instruction to contain the host. Intrusion alerts
-   do not automatically produce response commands.
-5. **Response policy handles eligible malware detections separately.** If
-   telemetry satisfies the deterministic process-response policy, the server
-   may authorize termination of the exact observed process. Isolation remains
-   off unless explicitly enabled and supported by the required evidence.
-6. **The agent revalidates and reports.** It checks authorization, host, and
-   exact target identity; it then executes, rejects, or dry-runs the command
-   and reports the outcome. The dashboard distinguishes the server's
-   authorization from the endpoint's report.
-
-There is no fixed end-to-end response time guarantee. Polling intervals,
-permissions, host connectivity, model availability, and system load can all
-affect what is observed and when.
-
-## Training the optional sequence model
-
-The model is an interpretable event-transition baseline, not a fine-tuned
-language model, malware classifier, or probability that an attacker will take
-a particular action. The project does not bundle labeled datasets or a
-trained artifact. It should remain unconfigured until representative,
-permissioned, privacy-reviewed data is available.
-
-Training input is JSONL, with one episode per line and these fields:
-
-- `campaign_id`: stable identifier for the incident or campaign.
-- `label`: `attack` or `benign`.
-- `events`: ordered normalized event tokens, such as
-  `windows.security.4625`.
-- `episode_id`: optional unique episode identifier.
-
-Keep campaigns wholly separate between training and evaluation, and use one
-label per campaign. Both splits must contain attack and benign campaigns.
-Training requires at least three distinct labeled attack campaigns, and a
-transition is retained only when it is supported by the required number of
-distinct attack campaigns. Do not label synthetic sequences or unverified
-alerts as ground truth.
-
-The command and quality-gate options are documented in the README's
-**AI and sequence-model status** section. Passing those gates is not proof of
-generalization: evaluation quality depends on the dataset and split. In
-particular, the benign supported-transition rate is a screening metric, not a
-calibrated false-positive rate. Keep the model advisory-only and validate it
-on independent campaigns and hosts before considering any separately
-designed prevention feature.
-
-## Operator guidance
-
-- Start in an isolated test environment and use agent dry-run mode.
-- Review the quick start for response defaults, permissions, recovery steps,
-  event-log access, and troubleshooting.
-- Treat unknown, partial, failed, rejected, and interrupted outcomes as
-  requiring investigation; do not infer success from authorization alone.
-- Keep intrusion alerts and learned predictions advisory. Validate their
-  quality with real, permissioned data before proposing automated action.
-- Treat this repository as an evolving prototype, not certified endpoint
-  protection or a substitute for incident response procedures.
-
-See the [README](README.md) for current architecture and model documentation
-and the [Autonomous Defense Quick Start](AUTONOMOUS_AI_DEFENSE_QUICKSTART.md)
-for setup and operational details.
+Use only real, permissioned, privacy-reviewed data—not made-up examples or
+unverified alerts. Passing the model's checks does not guarantee it will work
+on other computers. Keep predictions advisory and test them on separate
+computers and incidents. See the [README](README.md) for the training command
+and the [Quick Start](AUTONOMOUS_AI_DEFENSE_QUICKSTART.md) for setup and
+safety instructions.
