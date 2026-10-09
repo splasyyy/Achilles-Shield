@@ -3,10 +3,12 @@ import os, sys, time, socket, platform, json, threading
 import psutil, requests
 from autonomous_defense import (
     AutonomousDefense,
+    STATE_DB,
     defense_actions_enabled,
     defense_dry_run_enabled,
     normalize_server_url,
 )
+from intrusion_alerts import WindowsIntrusionMonitor
 
 SERVER_URL = normalize_server_url(
     os.environ.get("SERVER_URL", "http://127.0.0.1:5000")
@@ -18,6 +20,7 @@ INTERVAL = int(os.environ.get("INTERVAL", "2"))
 
 # Initialize autonomous defense
 defense = AutonomousDefense()
+intrusion_monitor = WindowsIntrusionMonitor(STATE_DB, source_id=HOST_ID)
 
 def collect():
     """Collect system telemetry data."""
@@ -26,6 +29,7 @@ def collect():
         "ts": time.time(),
         "os": platform.platform(),
         "hostname": socket.gethostname(),
+        "auth_monitor": intrusion_monitor.collect(),
         "processes": [],
         "cpu": psutil.cpu_percent(interval=0.5),
         "ram": {
@@ -144,6 +148,8 @@ if __name__ == "__main__":
         try:
             data = collect()
             ok = send(data)
+            if ok:
+                intrusion_monitor.acknowledge(data)
             print(f"✓ Telemetry sent | Processes: {len(data['processes'])} | CPU: {data['cpu']:.1f}% | RAM: {data['ram']['percent']:.1f}%")
             time.sleep(INTERVAL)
         except KeyboardInterrupt:

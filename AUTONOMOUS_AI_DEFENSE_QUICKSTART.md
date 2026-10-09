@@ -80,6 +80,79 @@ state database is accessible and the configured server URL/API key can reach the
 authenticated, read-only health endpoint. This check does not poll queued commands,
 send telemetry, or perform mitigation.
 
+## Intrusion alerts (Windows)
+
+Every 15 seconds, the Windows agent polls selected Security events (4625 failed
+logon, 4624 successful logon, 4740 account lockout, 4672 special privileges,
+and 4698 scheduled-task creation) and System event 7045 (service installation).
+Security and System use independent cursors. The first successful query for
+each channel establishes a baseline and skips older events.
+
+The server creates alert-only records for:
+
+- **Failed-logon burst:** at least five failures from one source IP to one host
+  within five minutes (medium severity).
+- **Cross-host password spray:** at least ten failures from one IP across at
+  least three distinct hosts within ten minutes (high severity).
+- **Failure followed by success:** a successful logon from the same IP and host
+  after at least three failures within 30 minutes (high severity).
+- **Lockout, scheduled-task creation, and service installation:** Windows
+  events 4740, 4698, and 7045 respectively (medium severity).
+- **Interactive privileged logon:** event 4672 correlated with a successful
+  interactive or remote-interactive logon (4624 logon type 2 or 10) on the
+  same host within two minutes (medium severity). This correlation avoids
+  alerting on the many routine service privilege assignments.
+
+Duplicate channel/record pairs are ignored. Repeated alerts for the same
+host/source or event category are limited to one per five minutes. Where
+Windows provides them, failed/successful logons include source port, logon
+type, workstation name, and status/substatus codes; alert summaries group the
+observed values and show the affected endpoints for a cross-host spray. The
+dashboard classifies IPs only as globally routable, non-global/private or
+special-use, link-local, or other reserved scope. Workstation names are
+explicitly reported values and are not independently verified.
+
+This is source evidence, **not identification of a person or proof of origin**:
+addresses can represent NAT gateways, VPNs, proxies, shared networks, or
+spoofed/untrusted telemetry. The system does not geolocate addresses or query
+external threat-intelligence services. Account names, task contents, and
+service image paths are not collected. Event summaries and source details
+needed for correlation are retained for up to 24 hours; compact alert
+summaries remain in threat history under its normal retention.
+
+For these alert patterns the dashboard also shows a **rules-based path
+hypothesis**: the observed stage, one plausible next step, the signals behind
+it, a confidence label, and a suggested containment measure. This is a
+transparent heuristic, not a learned or calibrated forecast; benign
+administration, shared egress IPs, and incomplete event coverage can change
+the interpretation. A predicted step is explicitly labeled **not observed**.
+Suggested controls are operator guidance only: intrusion predictions do not
+change firewalls, terminate sessions, disable accounts, or queue response
+commands. Validate alert and prediction quality with real endpoint data before
+considering a later, separately designed, reversible automated control.
+
+An optional learned event-transition baseline can supplement these heuristics
+when an operator provides privacy-reviewed labeled attack and benign traces,
+held out by campaign. It ranks supported next Windows event types, shows
+empirical training frequencies and held-out metrics, and abstains on
+unsupported transitions. The frequencies are not calibrated attacker
+probabilities. No training corpus, training JSONL, evaluation JSONL, or model
+artifact is bundled. Do not treat fabricated or unverified events as labeled
+attack data. The README's **AI and sequence-model status** section documents
+the JSONL episode fields, training command, required quality gates, and model
+configuration using `INTRUSION_SEQUENCE_MODEL_PATH`.
+
+The dashboard's **Windows logs** column shows aggregate readiness plus the status
+of each channel. A **degraded** status means one channel is readable while
+another is not; **unavailable** means neither can be read. Windows must be
+configured to audit the relevant event types, and reading the Security log may
+require additional Windows permissions. **Ready** means only that the agent can
+read the channel; it does not confirm that audit policy is producing all event
+types. Other operating systems report this Windows-only monitor as
+**unsupported**. These detections create alerts only: they do not invoke AI
+analysis, queue process termination, or isolate the host. Response decisions
+for intrusion alerts remain a separate future step.
+
 ### Optional: Install Ollama for local LLM analysis
 
 **Windows:**
@@ -179,7 +252,7 @@ automatic response action.
 Start with the focused regression suite from the repository root:
 
 ```bash
-python -m unittest tests.test_response_safety tests.test_server_flow -q
+python -m unittest tests.test_intrusion_alerts tests.test_intrusion_sequence_model tests.test_response_safety tests.test_server_flow -q
 ```
 
 For a local connectivity check, run `python agent.py --check` from the `agent`
