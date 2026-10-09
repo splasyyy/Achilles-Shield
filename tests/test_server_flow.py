@@ -1,13 +1,16 @@
+import json
 import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from agent.autonomous_defense import AutonomousDefense
+from server.intrusion_sequence_model import train_model
 
 
 SERVER_DIRECTORY = Path(__file__).resolve().parents[1] / "server"
@@ -29,6 +32,7 @@ class ServerAgentFlowTests(unittest.TestCase):
         self.previous_api_key = server.API_KEY
         self.previous_engine = server.response_engine
         self.previous_analyzer = server.threat_analyzer
+        self.previous_sequence_model = server.intrusion_sequence_model
         server.DB = self.database
         server.API_KEY = "flow-test-key"
         server.response_engine = server.AutonomousResponseEngine(self.database)
@@ -57,6 +61,7 @@ class ServerAgentFlowTests(unittest.TestCase):
         server.API_KEY = self.previous_api_key
         server.response_engine = self.previous_engine
         server.threat_analyzer = self.previous_analyzer
+        server.intrusion_sequence_model = self.previous_sequence_model
         self.temp_directory.cleanup()
 
     def test_telemetry_to_agent_outcome_and_action_history(self):
@@ -218,6 +223,391 @@ class ServerAgentFlowTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM agent_action_log"
+            ).fetchone()[0]
+        self.assertEqual(0, count)
+
+    def test_failed_logon_burst_creates_alert_only_threat_without_response(self):
+        host_id = "auth-alert-host"
+        now = time.time()
+        telemetry = {
+            "host_id": host_id,
+            "ts": now,
+            "cpu": 10,
+            "ram": {"percent": 20},
+            "disk": {"percent": 30},
+            "processes": [],
+            "auth_monitor": {
+                "source": "windows_intrusion_events",
+                "status": "ready",
+                "detail": "Monitoring selected Windows Security and System events.",
+                "channels": {"Security": "ready", "System": "ready"},
+                "events": [{
+                    "channel": "Security",
+                    "record_id": record_id,
+                    "event_id": 4625,
+                    "ts": now - index,
+                    "source_ip": "203.0.113.8",
+                    "logon_type": "10",
+                    "source_port": str(53000 + index),
+                    "workstation_name": "reported-client",
+                    "status_code": "0xC000006D",
+                    "substatus_code": "0xC000006A",
+                } for index, record_id in enumerate(range(100, 105))],
+            },
+        }
+        headers = {"X-API-KEY": server.API_KEY}
+
+        response = self.client.post("/ingest", json=telemetry, headers=headers)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(1, response.get_json()["alerts_created"])
+        server.threat_analyzer.analyze_threat_with_ai.assert_not_called()
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            threats = connection.execute(
+                """SELECT threat_type, severity, description FROM threats
+                   WHERE host_id = ?""",
+                (host_id,),
+            ).fetchall()
+            command_count = connection.execute(
+                "SELECT COUNT(*) FROM defense_commands WHERE host_id = ?",
+                (host_id,),
+            ).fetchone()[0]
+            response_count = connection.execute(
+                "SELECT COUNT(*) FROM response_log WHERE host_id = ?",
+                (host_id,),
+            ).fetchone()[0]
+            stored_telemetry = connection.execute(
+                "SELECT data FROM telemetry WHERE host_id = ?",
+                (host_id,),
+            ).fetchone()[0]
+            intrusion_event_count = connection.execute(
+                "SELECT COUNT(*) FROM intrusion_events WHERE host_id = ?",
+                (host_id,),
+            ).fetchone()[0]
+            threat_evidence = json.loads(connection.execute(
+                "SELECT telemetry_data FROM threats WHERE host_id = ?",
+                (host_id,),
+            ).fetchone()[0])
+
+        self.assertEqual(1, len(threats))
+        self.assertEqual("intrusion_failed_logon_burst", threats[0][0])
+        self.assertEqual("medium", threats[0][1])
+        self.assertIn("Alert only", threats[0][2])
+        self.assertEqual(0, command_count)
+        self.assertEqual(0, response_count)
+        self.assertNotIn("events", json.loads(stored_telemetry)["auth_monitor"])
+        self.assertEqual(5, intrusion_event_count)
+        self.assertEqual("non-global / private or special-use",
+                         threat_evidence["source_scope"])
+        self.assertEqual(["reported-client"],
+                         threat_evidence["reported_workstations"])
+        self.assertEqual([53000, 53001, 53002, 53003, 53004],
+                         threat_evidence["source_ports"])
+        self.assertEqual(["0xC000006D/0xC000006A"],
+                         threat_evidence["failure_codes"])
+        self.assertEqual(["incorrect password", "invalid account or password"],
+                         threat_evidence["failure_reasons"])
+        prediction = threat_evidence["path_prediction"]
+        self.assertEqual("low", prediction["confidence"])
+        self.assertEqual("hypothesis_not_observed", prediction["status"])
+        self.assertEqual("recommendation_only", prediction["automation"])
+        self.assertEqual(
+            [
+                "Windows event pattern: intrusion_failed_logon_burst",
+                "Supporting event count: 5",
+                "Affected endpoints: 1",
+            ],
+            prediction["basis"],
+        )
+        self.assertIn("another exposed authentication service",
+                      prediction["next_likely_step"])
+        self.assertIn("MFA", prediction["protective_action"])
+        self.assertNotIn("private-account", str(threat_evidence))
+
+        repeated = self.client.post("/ingest", json=telemetry, headers=headers)
+        self.assertEqual(0, repeated.get_json()["alerts_created"])
+        dashboard = self.client.get("/")
+        self.assertIn(b"Failed Logon Burst", dashboard.data)
+        self.assertIn(b"alert-only Windows intrusion alerts", dashboard.data)
+        self.assertIn(b"Security: ready", dashboard.data)
+        self.assertIn(b"203.0.113.8", dashboard.data)
+        self.assertIn(b"Reported workstation(s) (unverified): reported-client",
+                      dashboard.data)
+        self.assertIn(b"Windows failure code(s)", dashboard.data)
+        self.assertIn(b"incorrect password", dashboard.data)
+        self.assertIn(b"Rules-based possible next step", dashboard.data)
+        self.assertIn(b"Hypothesis, not observed", dashboard.data)
+        self.assertIn(b"Close a door:", dashboard.data)
+
+    def test_password_spray_across_hosts_creates_one_alert_only_fleet_record(self):
+        headers = {"X-API-KEY": server.API_KEY}
+        now = time.time()
+        responses = []
+        for host_index in range(3):
+            for attempt in range(4):
+                host_id = f"spray-host-{host_index}"
+                responses.append(self.client.post(
+                    "/ingest",
+                    json={
+                        "host_id": host_id, "ts": now,
+                        "cpu": 10, "ram": {"percent": 20},
+                        "disk": {"percent": 30}, "processes": [],
+                        "auth_monitor": {
+                            "status": "degraded",
+                            "events": [{
+                                "channel": "Security",
+                                "record_id": host_index * 10 + attempt + 1,
+                                "event_id": 4625,
+                                "ts": now - attempt,
+                                "source_ip": "203.0.113.22",
+                            }],
+                        },
+                    },
+                    headers=headers,
+                ))
+
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        with closing(sqlite3.connect(self.database)) as connection:
+            spray_count = connection.execute(
+                """SELECT COUNT(*) FROM threats
+                   WHERE threat_type = 'intrusion_password_spray'"""
+            ).fetchone()[0]
+            commands = connection.execute(
+                "SELECT COUNT(*) FROM defense_commands"
+            ).fetchone()[0]
+            responses_count = connection.execute(
+                "SELECT COUNT(*) FROM response_log"
+            ).fetchone()[0]
+            spray_evidence = json.loads(connection.execute(
+                """SELECT telemetry_data FROM threats
+                   WHERE threat_type = 'intrusion_password_spray'"""
+            ).fetchone()[0])
+        self.assertEqual(1, spray_count)
+        self.assertEqual(0, commands)
+        self.assertEqual(0, responses_count)
+        self.assertEqual(
+            ["spray-host-0", "spray-host-1", "spray-host-2"],
+            spray_evidence["affected_hosts"],
+        )
+        self.assertGreaterEqual(spray_evidence["failed_logons"], 10)
+        self.assertEqual(
+            "hypothesis_not_observed",
+            spray_evidence["path_prediction"]["status"],
+        )
+        self.assertEqual(
+            "recommendation_only",
+            spray_evidence["path_prediction"]["automation"],
+        )
+        self.assertIn(
+            "Affected endpoints: 3",
+            spray_evidence["path_prediction"]["basis"],
+        )
+        self.assertIn("additional hosts or services",
+                      spray_evidence["path_prediction"]["next_likely_step"])
+        dashboard = self.client.get("/")
+        self.assertIn(b"Affected endpoints: spray-host-0, spray-host-1, spray-host-2",
+                      dashboard.data)
+        server.threat_analyzer.analyze_threat_with_ai.assert_not_called()
+
+    def test_success_after_failures_and_selected_windows_events_are_alert_only(self):
+        host_id = "correlated-auth-host"
+        now = time.time()
+        base = {
+            "host_id": host_id, "ts": now,
+            "cpu": 10, "ram": {"percent": 20},
+            "disk": {"percent": 30}, "processes": [],
+        }
+        headers = {"X-API-KEY": server.API_KEY}
+        failed = [{
+            "channel": "Security", "record_id": record_id,
+            "event_id": 4625, "ts": now - (4 - record_id),
+            "source_ip": "203.0.113.33",
+        } for record_id in (1, 2, 3)]
+        self.client.post(
+            "/ingest",
+            json={**base, "auth_monitor": {"status": "ready", "events": failed}},
+            headers=headers,
+        )
+        correlated_events = [
+            {
+                "channel": "Security", "record_id": 4, "event_id": 4624,
+                "ts": now, "source_ip": "203.0.113.33", "logon_type": "10",
+                "logon_id": "0xabc",
+                "source_port": "3389", "workstation_name": "rdp-client",
+            },
+            {
+                "channel": "Security", "record_id": 5, "event_id": 4672,
+                "ts": now + 1, "logon_id": "0xabc",
+            },
+            {"channel": "Security", "record_id": 6, "event_id": 4740, "ts": now},
+            {"channel": "Security", "record_id": 7, "event_id": 4698, "ts": now},
+            {"channel": "System", "record_id": 8, "event_id": 7045, "ts": now},
+        ]
+        response = self.client.post(
+            "/ingest",
+            json={**base, "auth_monitor": {
+                "status": "ready", "events": correlated_events,
+                "checkpoints": {"Security": 7, "System": 8},
+            }},
+            headers=headers,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(5, response.get_json()["alerts_created"])
+        server.threat_analyzer.analyze_threat_with_ai.assert_not_called()
+        with closing(sqlite3.connect(self.database)) as connection:
+            threat_types = {
+                row[0] for row in connection.execute(
+                    "SELECT threat_type FROM threats WHERE host_id = ?", (host_id,)
+                )
+            }
+            queued = connection.execute(
+                "SELECT COUNT(*) FROM defense_commands WHERE host_id = ?",
+                (host_id,),
+            ).fetchone()[0]
+            stored = json.loads(connection.execute(
+                "SELECT data FROM telemetry WHERE host_id = ? ORDER BY id DESC LIMIT 1",
+                (host_id,),
+            ).fetchone()[0])
+            success_evidence = json.loads(connection.execute(
+                """SELECT telemetry_data FROM threats
+                   WHERE host_id = ? AND threat_type = 'intrusion_failed_logon_success'""",
+                (host_id,),
+            ).fetchone()[0])
+        self.assertEqual({
+            "intrusion_failed_logon_success",
+            "intrusion_interactive_privileged_logon",
+            "intrusion_account_lockout",
+            "intrusion_scheduled_task_created",
+            "intrusion_service_installed",
+        }, threat_types)
+        self.assertEqual(0, queued)
+        self.assertEqual("203.0.113.33", success_evidence["source_ip"])
+        self.assertEqual(3389, success_evidence["source_port"])
+        self.assertEqual("rdp-client", success_evidence["reported_workstation"])
+        self.assertEqual("10", success_evidence["success_logon_type"])
+        self.assertNotIn("events", stored["auth_monitor"])
+        self.assertNotIn("checkpoints", stored["auth_monitor"])
+        repeated = self.client.post(
+            "/ingest",
+            json={**base, "auth_monitor": {
+                "status": "ready", "events": correlated_events,
+            }},
+            headers=headers,
+        )
+        self.assertEqual(0, repeated.get_json()["alerts_created"])
+
+    def test_validated_sequence_model_adds_advisory_next_event_candidates(self):
+        event_sequence = [
+            "windows.security.4625",
+            "windows.security.4624",
+            "windows.security.4672",
+        ]
+        benign_sequence = [
+            "windows.security.4625",
+            "windows.security.4624",
+            "windows.security.4740",
+        ]
+        server.intrusion_sequence_model = train_model(
+            [
+                {"campaign_id": f"model-training-{index}",
+                 "label": "attack", "events": event_sequence}
+                for index in range(3)
+            ] + [{
+                "campaign_id": "model-benign-training",
+                "label": "benign", "events": benign_sequence,
+            }],
+            [
+                {
+                    "campaign_id": "model-heldout",
+                    "label": "attack", "events": event_sequence,
+                },
+                {
+                    "campaign_id": "model-benign-heldout",
+                    "label": "benign", "events": benign_sequence,
+                },
+            ],
+        )
+        now = time.time()
+        response = self.client.post(
+            "/ingest",
+            json={
+                "host_id": "sequence-model-host", "ts": now,
+                "cpu": 10, "ram": {"percent": 20},
+                "disk": {"percent": 30}, "processes": [],
+                "auth_monitor": {
+                    "status": "ready",
+                    "events": [{
+                        "channel": "Security",
+                        "record_id": record_id,
+                        "event_id": 4625,
+                        "ts": now - index,
+                        "source_ip": "203.0.113.77",
+                    } for index, record_id in enumerate(range(700, 705))],
+                },
+            },
+            headers={"X-API-KEY": server.API_KEY},
+        )
+        self.assertEqual(200, response.status_code)
+        with closing(sqlite3.connect(self.database)) as connection:
+            evidence = json.loads(connection.execute(
+                """SELECT telemetry_data FROM threats
+                   WHERE host_id = ? AND threat_type = 'intrusion_failed_logon_burst'""",
+                ("sequence-model-host",),
+            ).fetchone()[0])
+            command_count = connection.execute(
+                "SELECT COUNT(*) FROM defense_commands"
+            ).fetchone()[0]
+        learned = evidence["path_prediction"]["learned_next_events"]
+        self.assertEqual(
+            "windows.security.4624",
+            learned["candidates"][0]["event"],
+        )
+        self.assertEqual("successful logon", learned["candidates"][0]["event_name"])
+        self.assertEqual(1.0, learned["candidates"][0]["frequency"])
+        self.assertEqual(3, learned["candidates"][0]["campaign_count"])
+        self.assertEqual(1.0, learned["held_out_top1_accuracy"])
+        self.assertIn("not an attacker probability", learned["ranking_semantics"])
+        self.assertEqual("advisory_only", learned["automation"])
+        self.assertEqual(0, command_count)
+        dashboard = self.client.get("/")
+        self.assertIn(b"Labeled-sequence model", dashboard.data)
+        self.assertIn(b"empirical frequency, not attacker probability",
+                      dashboard.data)
+        self.assertIn(b"successful logon", dashboard.data)
+
+    def test_failed_logons_without_source_ips_do_not_form_a_burst(self):
+        now = time.time()
+        telemetry = {
+            "host_id": "auth-alert-no-source-host",
+            "ts": now,
+            "cpu": 10,
+            "ram": {"percent": 20},
+            "disk": {"percent": 30},
+            "processes": [],
+            "auth_monitor": {
+                "status": "ready",
+                "events": [{
+                    "record_id": record_id,
+                    "event_id": 4625,
+                    "ts": now - index,
+                    "source_ip": None,
+                } for index, record_id in enumerate(range(200, 206))],
+            },
+        }
+
+        response = self.client.post(
+            "/ingest",
+            json=telemetry,
+            headers={"X-API-KEY": server.API_KEY},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(0, response.get_json()["alerts_created"])
+        with closing(sqlite3.connect(self.database)) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM threats WHERE host_id = ?",
+                (telemetry["host_id"],),
             ).fetchone()[0]
         self.assertEqual(0, count)
 

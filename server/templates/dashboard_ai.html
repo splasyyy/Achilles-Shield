@@ -68,7 +68,7 @@
       <div class="panel table-wrap">
         {% if hosts %}
         <table>
-          <thead><tr><th>Host</th><th>State</th><th>Last seen</th><th>Operating system</th><th>CPU</th><th>Memory</th><th>Processes</th><th>Explore</th></tr></thead>
+          <thead><tr><th>Host</th><th>State</th><th>Last seen</th><th>Operating system</th><th>Windows logs</th><th>CPU</th><th>Memory</th><th>Processes</th><th>Explore</th></tr></thead>
           <tbody>
           {% for host in hosts %}
             <tr>
@@ -78,6 +78,15 @@
                 {{ relative_time(host.ts) }}
               </td>
               <td>{{ host.data.get('os', 'Unknown')|truncate(32) }}</td>
+              {% set auth_monitor = host.data.get('auth_monitor', {}) %}
+              <td title="{{ auth_monitor.get('detail', 'Agent does not report authentication-log status') }}">
+                <span class="status {{ 'online' if auth_monitor.get('status') == 'ready' else 'partial' if auth_monitor.get('status') == 'degraded' else 'disabled' if auth_monitor.get('status') == 'unsupported' else 'offline' }}">
+                  {{ auth_monitor.get('status', 'not reported')|replace('_', ' ') }}
+                </span>
+                {% if auth_monitor.get('channels') %}
+                  <span class="secondary-cell">{% for channel, status in auth_monitor.get('channels', {}).items() %}{{ channel }}: {{ status|replace('_', ' ') }}{% if not loop.last %} · {% endif %}{% endfor %}</span>
+                {% endif %}
+              </td>
               <td class="number">{{ host.data.get('cpu', 0)|round(1) }}%</td>
               <td class="number">{{ host.data.get('ram', {}).get('percent', 0)|round(1) }}%</td>
               <td class="number">{{ host.process_count }}</td>
@@ -93,18 +102,73 @@
     </section>
 
     <section class="section" id="threats">
-      <div class="section-heading"><div><h2>Recent detections</h2><p>Latest threat records across monitored endpoints</p></div><span class="muted">Latest {{ threats|length }}</span></div>
+      <div class="section-heading"><div><h2>Recent detections</h2><p>Includes alert-only Windows intrusion alerts; they do not authorize response actions.</p></div><span class="muted">Latest {{ threats|length }}</span></div>
       <div class="panel table-wrap">
         {% if threats %}
         <table>
-          <thead><tr><th>Host</th><th>Severity</th><th>Detection</th><th>Time</th><th>Context</th></tr></thead>
+          <thead><tr><th>Host</th><th>Severity</th><th>Detection</th><th>Time</th><th>Alert context</th><th>Source evidence</th></tr></thead>
           <tbody>{% for threat in threats %}
             <tr>
               <td><a class="primary-cell" href="/actions/{{ threat.host_id }}">{{ threat.host_id }}</a></td>
               <td><span class="severity {{ threat.severity|lower }}">{{ threat.severity|default('Unknown') }}</span></td>
               <td>{{ threat.threat_type|replace('_', ' ')|title }}</td>
               <td class="number nowrap" title="Unix timestamp {{ threat.ts|float|round(3) }}">{{ relative_time(threat.ts) }}</td>
-              <td>{{ threat.description|default('No additional context')|truncate(100) }}</td>
+              <td>{{ threat.description|default('No additional context')|truncate(120) }}</td>
+              <td class="details-cell">
+                {% set evidence = threat.evidence %}
+                {% set prediction = evidence.get('path_prediction', {}) %}
+                {% if prediction %}
+                  <strong>Rules-based possible next step · {{ prediction.get('confidence', 'low')|title }} heuristic confidence</strong>
+                  <span class="secondary-cell">Observed stage: {{ prediction.get('observed_stage') }}</span>
+                  <span class="secondary-cell">Hypothesis, not observed: {{ prediction.get('next_likely_step') }}</span>
+                  <span class="secondary-cell">Why: {{ prediction.get('confidence_basis') }}</span>
+                  <span class="secondary-cell">Close a door: {{ prediction.get('protective_action') }}</span>
+                  {% if prediction.get('basis') %}
+                    <span class="secondary-cell">Signals: {{ prediction.get('basis')|join('; ') }}</span>
+                  {% endif %}
+                  {% set learned = prediction.get('learned_next_events', {}) %}
+                  {% if learned.get('candidates') %}
+                    <strong class="secondary-cell">Labeled-sequence model · empirical frequency, not attacker probability</strong>
+                    {% for candidate in learned.get('candidates', []) %}
+                      <span class="secondary-cell">Possible next event: {{ candidate.get('event_name') }} · {{ (candidate.get('frequency', 0) * 100)|round(1) }}% of supported training transitions · {{ candidate.get('campaign_count') }} campaigns</span>
+                    {% endfor %}
+                    <span class="secondary-cell">Held-out top-1 accuracy: {{ (learned.get('held_out_top1_accuracy', 0) * 100)|round(1) }}% · coverage: {{ (learned.get('held_out_coverage', 0) * 100)|round(1) }}% · trained on {{ learned.get('training_attack_campaign_count') }} attack campaigns</span>
+                  {% endif %}
+                {% endif %}
+                {% if evidence.get('source_ip') %}
+                  <strong>{{ evidence.get('source_ip') }}</strong>
+                  <span class="secondary-cell">{{ evidence.get('source_scope', 'scope unknown') }} · {{ evidence.get('failed_logons', 0) }} failures · {{ evidence.get('host_count', 1) }} host(s)</span>
+                {% endif %}
+                {% if evidence.get('reported_workstations') %}
+                  <span class="secondary-cell">Reported workstation(s) (unverified): {{ evidence.get('reported_workstations')|join(', ')|truncate(100) }}</span>
+                {% elif evidence.get('reported_workstation') %}
+                  <span class="secondary-cell">Reported workstation (unverified): {{ evidence.get('reported_workstation')|truncate(80) }}</span>
+                {% endif %}
+                {% if evidence.get('source_ports') %}
+                  <span class="secondary-cell">Source port(s): {{ evidence.get('source_ports')|join(', ') }}</span>
+                {% elif evidence.get('source_port') %}
+                  <span class="secondary-cell">Source port: {{ evidence.get('source_port') }}</span>
+                {% endif %}
+                {% if evidence.get('logon_types') %}
+                  <span class="secondary-cell">Logon type(s): {{ evidence.get('logon_types')|join(', ') }}</span>
+                {% elif evidence.get('logon_type') %}
+                  <span class="secondary-cell">Logon type: {{ evidence.get('logon_type') }}</span>
+                {% elif evidence.get('success_logon_type') %}
+                  <span class="secondary-cell">Successful logon type: {{ evidence.get('success_logon_type') }}</span>
+                {% endif %}
+                {% if evidence.get('failure_codes') %}
+                  <span class="secondary-cell">Windows failure code(s): {{ evidence.get('failure_codes')|join(', ') }}</span>
+                {% endif %}
+                {% if evidence.get('failure_reasons') %}
+                  <span class="secondary-cell">Windows reports: {{ evidence.get('failure_reasons')|join(', ') }}</span>
+                {% endif %}
+                {% if evidence.get('affected_hosts') %}
+                  <span class="secondary-cell">Affected endpoints: {{ evidence.get('affected_hosts')|join(', ') }}{% if evidence.get('additional_hosts', 0) %} +{{ evidence.get('additional_hosts') }} more{% endif %}</span>
+                {% endif %}
+                {% if not evidence.get('source_ip') and not evidence.get('reported_workstation') and not evidence.get('reported_workstations') and not evidence.get('affected_hosts') %}
+                  <span class="muted">{% if prediction %}No network source details in this event.{% else %}No source details in this event.{% endif %}</span>
+                {% endif %}
+              </td>
             </tr>
           {% endfor %}</tbody>
         </table>
